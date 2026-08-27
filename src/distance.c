@@ -26,7 +26,7 @@ static float euclidean(int dim,float vec[dim], float query[dim]){
 Distance_func get_distance(MetricType metric){
     switch (metric) {
         case METRIC_COSINE:
-            return cosine; // Returning the pointer to your static function
+            return cosine; // Returning the pointer of static function
         case METRIC_EUCLIDEAN:
             return euclidean; 
         default:
