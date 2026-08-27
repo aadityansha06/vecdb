@@ -1,6 +1,6 @@
 #include "../include/storage.h"
 #include <stdio.h>
-
+#include <stdlib.h>
 #include <string.h>
 typedef  struct storage{
     char file_name[203];

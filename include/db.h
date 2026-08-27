@@ -2,6 +2,8 @@
 #define DB_H
 
 #include "distance.h"
+#include "storage.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -19,7 +21,7 @@
  * for vector database operations.
  */
 
-typedef  struct{
+typedef  struct Record{
     uint64_t id;
     float *vector;
     char *metadata;
@@ -33,8 +35,8 @@ typedef struct{
     uint64_t count;
     Record_t *records;
     Distance_func calculate_distance;
-    FILE *fp;
-}FlatDb_t;
+storage_t *storage;
+}FlatDb_t; //Master struct
 
 
 /**
@@ -49,6 +51,22 @@ typedef struct{
  */
 
 FlatDb_t* db_init(const char *db_name ,uint64_t dimension, uint64_t initial_capacity, MetricType metric);
+
+
+
+/**
+ * @brief function signature to insert inside Db.
+ *
+ * @returns 0 sucess and -1 failuer.
+ * @param db pointer
+ * @param id of inserted value
+ * @param vector of the embeedings
+ * @param Mapped meta-Data alongside the vector.
+ * 
+ */
+
+int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata);
+
 
 
 #endif
