@@ -18,7 +18,8 @@
 /**
  * @brief function signature to initilaize vectordb.
  *
- * @returns pointer to flatdb_t on sucess or NULL. If memory allocation or storage initialization fails.
+ * @returns pointer to flatdb_t on sucess or NULL. If memory allocation or
+ * storage initialization fails.
  * @param db_name without extension
  * @param dimension must be non-null
  * @param inital_capacity for the user-records.
@@ -54,7 +55,32 @@ FlatDb_t *db_init(const char *db_name, uint64_t dimension,
     free(db);
     return NULL;
   }
-    db->storage = storage;
+  db->storage = storage;
+  Record_t temp_record;
+
+  while (storage_load_record(db->storage, &temp_record, db->dimension) == 1) {
+    if (db->count == db->capacity) {
+
+      uint64_t new_capacity = db->capacity * 2;
+      Record_t *resize_main_record =
+          (Record_t *)realloc(db->records, sizeof(Record_t) * new_capacity);
+      if (resize_main_record == NULL) {
+        perror("Fatal Error: Failed to Load data due to out of memory \n");
+        free(db->records);
+        free(db->storage);
+        free(db);
+        return NULL;
+
+      } else {
+        db->records = resize_main_record;
+        db->capacity = new_capacity;
+      }
+    }
+
+    db->records[db->count] = temp_record;
+    db->count++;
+  }
+
   db->calculate_distance =
       get_distance(metric); // Returning the pointer of static function
 
@@ -113,28 +139,29 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
   db->records[db->count].metadata = meta_cpy;
   db->records[db->count].is_deleted = false;
 
+  /**
+   * @brief Appends a single vector record to the binary storage file on disk.
+   *
+   * @returns 0 on success, or -1 if the disk write fails.
+   * @param storage Pointer to the opaque storage context.
+   * @param record Pointer to the specific record in RAM to be written.
+   * @param dimension The dimensionality of the vector (needed to calculate byte
+   * size).
+   *
+   */
 
-/**
- * @brief Appends a single vector record to the binary storage file on disk.
- *
- * @returns 0 on success, or -1 if the disk write fails.
- * @param storage Pointer to the opaque storage context.
- * @param record Pointer to the specific record in RAM to be written.
- * @param dimension The dimensionality of the vector (needed to calculate byte size).
- * 
- */
+  int db_write =
+      storage_write_record(db->storage, &db->records[db->count], db->dimension);
+  if (db_write < 0) {
 
-   int db_write =storage_write_record(db->storage, &db->records[db->count], db->dimension);
-    if (db_write<0){
-        perror("Fatal Error: Failed to write record\n");
-        free(vec_cpy);
-    if (meta_cpy != NULL) free(meta_cpy);
-              return -1;
- 
-    }
+    perror("Fatal Error: Failed to write record\n");
+    free(vec_cpy);
+    if (meta_cpy != NULL)
+      free(meta_cpy);
+    return -1;
+  }
 
-
-    db->count++;
+  db->count++;
 
   return 0;
 }
