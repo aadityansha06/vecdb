@@ -125,6 +125,13 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
  */
 
    int db_write =storage_write_record(db->storage, &db->records[db->count], db->dimension);
+    if (db_write<0){
+        perror("Fatal Error: Failed to write record\n");
+        free(vec_cpy);
+    if (meta_cpy != NULL) free(meta_cpy);
+              return -1;
+ 
+    }
 
 
     db->count++;
