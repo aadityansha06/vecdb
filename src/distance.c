@@ -11,8 +11,9 @@ static float cosine(int dim,float vec[dim], float query[dim]){
         mod_b += query[i]*query[i];
 
     }
-      float result = dot_product/(sqrtf(mod_a)*sqrtf(mod_b));
-    return result;
+      float similarity = dot_product/(sqrtf(mod_a)*sqrtf(mod_b));
+       return 1.0f - similarity; //lower = closer, same direction as euclidean
+    
 }
 
 static float euclidean(int dim,float vec[dim], float query[dim]){
