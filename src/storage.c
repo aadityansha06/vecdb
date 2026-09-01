@@ -1,24 +1,37 @@
 #include "../include/storage.h"
 
 #include "../include/db.h"
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 typedef struct storage {
   char file_name[203];
   FILE *fp;
 
 } storage_t;
 
-storage_t *storage_init(const char *db_name) {
+storage_t *storage_init(const char *table_name) {
   storage_t *storage = (storage_t *)malloc(sizeof(struct storage));
   if (storage == NULL)
     return NULL;
   char db_path[200];
-  snprintf(db_path, sizeof(db_path), "%s.db", db_name);
+  char folder_path[256];
+
+  snprintf(folder_path, sizeof(folder_path), "origin_data/%s", table_name);
+
+  if (mkdir(folder_path, 0777) == -1) {
+    if (errno != EEXIST) {
+      free(storage);
+      return NULL;
+    }
+  }
+  snprintf(db_path, sizeof(db_path), "%s/data.db", folder_path);
   storage->fp =
       fopen(db_path, "a+b"); // TODO: load existing records from file on init
   if (storage->fp == NULL) {
@@ -26,7 +39,8 @@ storage_t *storage_init(const char *db_name) {
     free(storage);
     return NULL;
   }
-
+  strncpy(storage->file_name, db_path, sizeof(storage->file_name) - 1);
+  storage->file_name[sizeof(storage->file_name) - 1] = '\0';
   return storage;
 }
 
@@ -132,4 +146,115 @@ int storage_load_record(storage_t *storage, Record_t *record,
   }
 
   return 1;
+}
+
+int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
+                   uint64_t dimension) {
+
+  char index_path[256];
+  snprintf(index_path, sizeof(index_path), "origin_data/%s/ivf_index.bin",
+           table_name);
+  FILE *fp = fopen(index_path, "wb");
+  if (fp == NULL)
+    return -1;
+
+  size_t written = fwrite(&k, sizeof(uint64_t), 1, fp);
+  if (written != 1) {
+    fclose(fp);
+    return -1;
+  }
+  written = fwrite(&dimension, sizeof(uint64_t), 1, fp);
+  if (written != 1) {
+    fclose(fp);
+    return -1;
+  }
+
+  for (int i = 0; i < k; i++) {
+
+    written = fwrite(clusters[i].centroid_vector, sizeof(float), dimension, fp);
+    if (written != dimension) {
+      fclose(fp);
+      return -1;
+    }
+    written = fwrite(&clusters[i].count, sizeof(uint64_t), 1, fp);
+    if (written != 1) {
+      fclose(fp);
+      return -1;
+    }
+    written = fwrite(&clusters[i].capacity, sizeof(uint64_t), 1, fp);
+    if (written != 1) {
+      fclose(fp);
+      return -1;
+    }
+
+    written = fwrite(clusters[i].record_index, sizeof(uint64_t),
+                     clusters[i].count, fp);
+    if (written != clusters[i].count){
+        fclose(fp);
+        return -1;
+    }
+  }
+  fclose(fp);
+  return 0;
+}
+
+cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
+                          uint64_t dimension) {
+  char index_path[256];
+  snprintf(index_path, sizeof(index_path), "origin_data/%s/ivf_index.bin",
+           table_name);
+  FILE *fp = fopen(index_path, "rb");
+  if (fp == NULL)
+    return NULL;
+
+  size_t read = fread(out_k, sizeof(uint64_t), 1, fp);
+  if (read != 1) {
+    fclose(fp);
+    return NULL;
+  }
+
+  read = fread(&dimension, sizeof(uint64_t), 1, fp);
+  if (read != 1) {
+    fclose(fp);
+    return NULL;
+  }
+
+  cluster_t *cluster = (cluster_t *)malloc(sizeof(cluster_t) * (*out_k));
+  if (cluster == NULL) {
+    fclose(fp);
+    return NULL;
+  }
+
+  for (int i = 0; i < (*out_k); i++) {
+    cluster[i].centroid_vector = (float *)malloc(sizeof(float) * dimension);
+    read = fread(cluster[i].centroid_vector, sizeof(float), dimension, fp);
+    if (read != dimension){
+        fclose(fp);
+      return NULL;
+    }
+
+    read = fread(&cluster[i].count, sizeof(uint64_t), 1, fp);
+    if (read != 1) {
+      fclose(fp);
+      return NULL;
+    }
+
+    read = fread(&cluster[i].capacity, sizeof(uint64_t), 1, fp);
+    if (read != 1) {
+      fclose(fp);
+      return NULL;
+    }
+    cluster[i].record_index = malloc(sizeof(uint64_t) * cluster[i].capacity);
+
+    if (cluster[i].count > 0) {
+      read = fread(cluster[i].record_index, sizeof(uint64_t), cluster[i].count,
+                   fp);
+      if (read != cluster[i].count) {
+        fclose(fp);
+        return NULL;
+      }
+    }
+  }
+  fclose(fp);
+  return cluster;
 }

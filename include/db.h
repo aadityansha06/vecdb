@@ -2,7 +2,7 @@
 #define DB_H
 
 #include "distance.h"
-#include "storage.h"
+//#include "storage.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -12,7 +12,7 @@
 #include <stdlib.h>
 
 #define DEFAULT_CAPACITY 1024
-
+typedef struct storage storage_t; 
 /**
  * @file db.h
  * @brief Interface to  handel DB initialization in src/db.c

@@ -1,14 +1,11 @@
 #ifndef  STORAGE_H
 #define STORAGE_H
-
-
+#include "search/kmeans.h"
 #include <stdint.h>
-
 typedef struct Record Record_t;
 typedef struct storage storage_t; // contain file-pointer
 
-storage_t *storage_init(const char* db_name);
-
+storage_t *storage_init(const char* table_name);
 
 /**
  * @brief Appends a single vector record to the binary storage file on disk.
@@ -32,6 +29,30 @@ int storage_write_record(storage_t *storage,Record_t *record,uint64_t dimension)
  * @param dimension The dimensionality of the vector (needed to malloc RAM for vector).
 */
 int storage_load_record(storage_t *storage,Record_t *record, uint64_t dimension);
+
+/**
+ * @brief Serializes the trained IVF clusters to disk.
+ * 
+ * @param table_name The name of the table/folder (e.g., "movies").
+ * @param clusters The pointer to the array of trained clusters.
+ * @param k The number of clusters.
+ * @param dimension The vector dimensionality.
+ * @return 0 on success, -1 on failure.
+ */
+int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k, uint64_t dimension);
+
+/**
+ * @brief Deserializes the IVF clusters from disk into RAM.
+ * 
+ * @param table_name The name of the table/folder.
+ * @param out_k Pointer to store the loaded 'k' value.
+ * @param dimension The vector dimensionality.
+ * @return A heap-allocated array of cluster_t, or NULL on failure.
+ */
+cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k, uint64_t dimension);
+
+
+
 
 #endif
 
