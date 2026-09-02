@@ -138,7 +138,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
   db->records[db->count].vector = vec_cpy;
   db->records[db->count].metadata = meta_cpy;
   db->records[db->count].is_deleted = false;
-
+db->records[db->count].byte_offset = storage_current_offset(db->storage);  
   /**
    * @brief Appends a single vector record to the binary storage file on disk.
    *
@@ -165,3 +165,81 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
   return 0;
 }
+
+int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k, uint64_t nprobe, cluster_t *clusters, uint64_t num_clusters, SearchResult_t *out_results) {
+    
+    // 1. Initialize out_results (Your exact logic)
+    for (uint64_t i = 0; i < top_k; i++) {
+        out_results[i].calculated_distance = 1e30; // Using 1e30 as a safe infinity
+        out_results[i].id = 0;
+        out_results[i].metadata = NULL;
+    }
+
+    // 2. Coarse Search: Get the flattened array of disk offsets
+    ivf_fetched_t *fetched = ivf_search(clusters, query_vector, nprobe, num_clusters, db->dimension, db->calculate_distance);
+    if (fetched == NULL) return -1;
+
+    // 3. Fine Search: Fetch from disk and sort
+    for (uint64_t i = 0; i < fetched->count; i++) {
+        uint64_t byte_offset = fetched->ids[i]; 
+        
+        Record_t temp_record;
+        
+        // Use the fseek function we built to pull ONLY this record into RAM
+        if (storage_fetch_by_offset(db->storage, byte_offset, &temp_record, db->dimension) == 1) {
+            
+            if (temp_record.is_deleted) {
+                free(temp_record.vector);
+                if (temp_record.metadata) free(temp_record.metadata);
+                continue;
+            }
+
+            // Your exact distance math
+            float dis = db->calculate_distance(db->dimension, temp_record.vector, query_vector);
+
+            // Your exact bounded insertion sort
+            if (dis < out_results[top_k - 1].calculated_distance) {
+                
+                int insert_idx = top_k - 1;
+                while (insert_idx > 0 && dis < out_results[insert_idx - 1].calculated_distance) {
+                    insert_idx--;
+                }
+
+                for (int j = top_k - 1; j > insert_idx; j--) {
+                    // Free the metadata we are about to overwrite to prevent leaks
+                    if (out_results[j].metadata != NULL) {
+                        free(out_results[j].metadata); 
+                    }
+                    out_results[j] = out_results[j - 1];
+                }
+
+                out_results[insert_idx].id = temp_record.id;
+                out_results[insert_idx].calculated_distance = dis;
+                
+                // CRITICAL FIX: Duplicate the string so it survives the temp_record free
+                if (temp_record.metadata != NULL) {
+                    out_results[insert_idx].metadata = strdup(temp_record.metadata);
+                } else {
+                    out_results[insert_idx].metadata = NULL;
+                }
+            } else {
+                // If it didn't make the top K, we don't need its metadata
+            }
+
+            // Instantly free the temporary record so RAM usage stays perfectly flat
+            free(temp_record.vector);
+            if (temp_record.metadata) free(temp_record.metadata);
+        }
+    }
+    
+    // Clean up the index array
+    free(fetched->ids);
+    free(fetched);
+    
+    return 0;
+}
+
+
+
+
+

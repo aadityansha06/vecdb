@@ -7,6 +7,10 @@ typedef struct storage storage_t; // contain file-pointer
 
 storage_t *storage_init(const char* table_name);
 
+
+uint64_t storage_current_offset(storage_t *storage);
+
+
 /**
  * @brief Appends a single vector record to the binary storage file on disk.
  *

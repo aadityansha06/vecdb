@@ -13,6 +13,8 @@
 
 #define DEFAULT_CAPACITY 1024
 typedef struct storage storage_t; 
+
+typedef struct cluster cluster_t;
 /**
  * @file db.h
  * @brief Interface to  handel DB initialization in src/db.c
@@ -38,8 +40,12 @@ typedef struct{
     Distance_func calculate_distance;
 storage_t *storage;
 }FlatDb_t; //Master struct
-
-
+           
+typedef struct search {
+    uint64_t id;
+    float calculated_distance;
+    char *metadata;
+} SearchResult_t;
 /**
  * @brief function signature to initilaize vectordb.
  *
@@ -69,5 +75,7 @@ FlatDb_t* db_init(const char *db_name ,uint64_t dimension, uint64_t initial_capa
 int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata);
 
 
-
+int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
+                   uint64_t nprobe, cluster_t *clusters, uint64_t num_clusters,
+                   SearchResult_t *out_results);
 #endif

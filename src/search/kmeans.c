@@ -177,3 +177,6 @@ ivf_fetched_t *ivf_search(cluster_t *cluster, float *query_vector,
   free(best_clusters);
   return ivf_fetched;
 }
+
+
+

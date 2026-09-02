@@ -33,4 +33,5 @@ ivf_fetched_t *ivf_search(cluster_t *cluster, float *query_vector,
                           uint64_t nprobe, uint64_t k, uint64_t dimension,
                           Distance_func calc_distance);
 
+
 #endif

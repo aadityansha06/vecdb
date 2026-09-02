@@ -17,11 +17,17 @@ typedef struct storage {
 } storage_t;
 
 storage_t *storage_init(const char *table_name) {
-  storage_t *storage = (storage_t *)malloc(sizeof(struct storage));
+storage_t *storage = (storage_t *)malloc(sizeof(struct storage));
   if (storage == NULL)
     return NULL;
   char db_path[200];
   char folder_path[256];
+
+  // create the parent directory first
+  if (mkdir("origin_data", 0777) == -1 && errno != EEXIST) {
+    free(storage);
+    return NULL;
+  }
 
   snprintf(folder_path, sizeof(folder_path), "origin_data/%s", table_name);
 
@@ -30,8 +36,7 @@ storage_t *storage_init(const char *table_name) {
       free(storage);
       return NULL;
     }
-  }
-  snprintf(db_path, sizeof(db_path), "%s/data.db", folder_path);
+  }  snprintf(db_path, sizeof(db_path), "%s/data.db", folder_path);
   storage->fp =
       fopen(db_path, "a+b"); // TODO: load existing records from file on init
   if (storage->fp == NULL) {
@@ -82,6 +87,7 @@ int storage_write_record(storage_t *storage, Record_t *record,
 
   return 0;
 }
+
 
 /**
  * @brief Reads the next record from the disk into the provided record struct for ENN.
@@ -153,6 +159,12 @@ long current_pos = ftell(storage->fp);
   return 1;
 }
 
+uint64_t storage_current_offset(storage_t *storage) {
+  if (storage == NULL || storage->fp == NULL) return 0;
+  if (fseek(storage->fp, 0, SEEK_END) != 0) return 0;  
+  long pos = ftell(storage->fp);
+  return pos < 0 ? 0 : (uint64_t)pos;
+}
 int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
                    uint64_t dimension) {
 
@@ -174,7 +186,7 @@ int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
     return -1;
   }
 
-  for (int i = 0; i < k; i++) {
+  for (uint64_t i = 0; i < k; i++) {
 
     written = fwrite(clusters[i].centroid_vector, sizeof(float), dimension, fp);
     if (written != dimension) {
@@ -230,7 +242,7 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     return NULL;
   }
 
-  for (int i = 0; i < (*out_k); i++) {
+  for (uint64_t i = 0; i < (*out_k); i++) {
     cluster[i].centroid_vector = (float *)malloc(sizeof(float) * dimension);
     read = fread(cluster[i].centroid_vector, sizeof(float), dimension, fp);
     if (read != dimension){
@@ -249,7 +261,7 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
       fclose(fp);
       return NULL;
     }
-    cluster[i].record_index = malloc(sizeof(uint64_t) * cluster[i].capacity);
+   cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].capacity);
 
     if (cluster[i].count > 0) {
       read = fread(cluster[i].byte_offsets, sizeof(uint64_t), cluster[i].count,

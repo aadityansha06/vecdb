@@ -13,8 +13,7 @@ SRCS = $(SRC_DIR)/db.c \
        $(SRC_DIR)/terminal.c \
        $(SRC_DIR)/server.c \
        $(SEARCH_DIR)/baseline-flat.c \
-       $(SEARCH_DIR)/ivf-flat.c
-
+	   $(SEARCH_DIR)/kmeans.c
 OBJS = $(SRCS:%.c=$(BUILD_DIR)/%.o)
 
 CFLAGS = -Wall -Wextra -I$(INC_DIR) -O3 -march=native -ffast-math -ftree-vectorize
