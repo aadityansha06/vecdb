@@ -26,6 +26,7 @@ typedef  struct Record{
     float *vector;
     char *metadata;
     bool is_deleted;
+    uint64_t byte_offset;
 }Record_t;
 
 

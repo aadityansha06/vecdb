@@ -84,7 +84,7 @@ int storage_write_record(storage_t *storage, Record_t *record,
 }
 
 /**
- * @brief Reads the next record from the disk into the provided record struct.
+ * @brief Reads the next record from the disk into the provided record struct for ENN.
  *
  * @returns 1 on success, 0 on End of File (EOF), or -1 on error.
  * @param storage Pointer for the file context
@@ -99,6 +99,11 @@ int storage_load_record(storage_t *storage, Record_t *record,
   if (storage == NULL || storage->fp == NULL || record == NULL) {
     return -1;
   }
+
+long current_pos = ftell(storage->fp);
+    if (current_pos == -1) return -1;
+    record->byte_offset = (uint64_t)current_pos;
+
 
   if (fread(&record->id, sizeof(uint64_t), 1, storage->fp) != 1)
     return 0; // EOF no record found
@@ -187,7 +192,7 @@ int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
       return -1;
     }
 
-    written = fwrite(clusters[i].record_index, sizeof(uint64_t),
+    written = fwrite(clusters[i].byte_offsets, sizeof(uint64_t),
                      clusters[i].count, fp);
     if (written != clusters[i].count){
         fclose(fp);
@@ -247,7 +252,7 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     cluster[i].record_index = malloc(sizeof(uint64_t) * cluster[i].capacity);
 
     if (cluster[i].count > 0) {
-      read = fread(cluster[i].record_index, sizeof(uint64_t), cluster[i].count,
+      read = fread(cluster[i].byte_offsets, sizeof(uint64_t), cluster[i].count,
                    fp);
       if (read != cluster[i].count) {
         fclose(fp);
@@ -257,4 +262,60 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
   }
   fclose(fp);
   return cluster;
+}
+
+
+
+
+
+
+
+int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset, Record_t *record, uint64_t dimension) {
+    if (storage == NULL || storage->fp == NULL || record == NULL) {
+        return -1;
+    }
+
+    if (fseek(storage->fp, byte_offset, SEEK_SET) != 0) {
+        return -1; 
+    }
+
+    if (fread(&record->id, sizeof(uint64_t), 1, storage->fp) != 1)
+        return 0; // EOF
+
+    if (fread(&record->is_deleted, sizeof(bool), 1, storage->fp) != 1)
+        return -1;
+
+    record->vector = (float *)malloc(sizeof(float) * dimension);
+    if (record->vector == NULL)
+        return -1;
+        
+    if (fread(record->vector, sizeof(float), dimension, storage->fp) != dimension) {
+        free(record->vector);
+        return -1;
+    }
+
+    size_t len = 0;
+    if (fread(&len, sizeof(size_t), 1, storage->fp) != 1) {
+        free(record->vector);
+        return -1;
+    }
+
+    if (len > 0) {
+        record->metadata = (char *)malloc(sizeof(char) * (len + 1));
+        if (record->metadata == NULL) {
+            free(record->vector);
+            return -1;
+        }
+
+        if (fread(record->metadata, sizeof(char), len, storage->fp) != len) {
+            free(record->vector);
+            free(record->metadata);
+            return -1;
+        }
+        record->metadata[len] = '\0';
+    } else {
+        record->metadata = NULL;
+    }
+
+    return 1;
 }

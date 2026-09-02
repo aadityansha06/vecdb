@@ -10,7 +10,7 @@
 
 
 
-int flat_search(Record_t *records, uint64_t count, uint64_t dimension, float *query_vector, uint32_t top_k, Distance_func calculate_distance, SearchResult_t *out_results){
+int flat_search(Record_t *records, uint64_t count, uint64_t dimension, float *query_vector, uint64_t top_k, Distance_func calculate_distance, SearchResult_t *out_results){
 
 
 
