@@ -1,10 +1,53 @@
 #include "../include/server.h"
+#include <stdbool.h>
+
 static void handel_client(server_data_t *server);
 static void send_error(server_data_t *server, Client_error err_code,
                        const char *details);
+
+static bool verify_api_key(const char *db_name, const char *provided_key) {
+  FILE *fp = fopen("origin_data/.auth_keys", "r");
+  if (fp == NULL)
+    return false;
+  char line[256];
+  char expected_match[200];
+
+  snprintf(expected_match, sizeof(expected_match), "%s:%s", db_name,
+           provided_key);
+
+  while (fgets(line, sizeof(line), fp)) {
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strcmp(line, expected_match) == 0) {
+      fclose(fp);
+      return true;
+    }
+  }
+
+  fclose(fp);
+  return false;
+}
+
+static bool authenticate_request(const char *request_buffer,
+                                 const char *db_name) {
+  const char *auth_header = strstr(request_buffer, "Authorization: Bearer ");
+  if (auth_header == NULL) {
+    return false;
+  }
+
+  char api_key[65] = {0};
+  auth_header += 22;
+  sscanf(auth_header, "%64s", api_key);
+
+  return verify_api_key(db_name, api_key);
+}
+
 int server_init(int PORT) {
   struct sockaddr_in serveadrr, clientadrr;
-  server_data_t *server;
+  server_data_t *server = malloc(sizeof(server_data_t));
+  if (server == NULL) {
+      printf("Failed to allocate server memory\n");
+      exit(1);
+  }
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     printf("Socket failed ");
@@ -54,14 +97,6 @@ static void handel_client(server_data_t *server) {
   }
   request_buffer[bytes_read] = '\0';
 
-  //  AUTHENTICATION GUARDRAIL
-  char *system_key = getenv("ORIGIN_API_KEY");
-
-  if (system_key == NULL || strstr(request_buffer, system_key) == NULL) {
-    send_error(server, UNAUTHORIZED_ACCESS, "Missing or Invalid API Key.");
-    return;
-  }
-
   // Search Route
   if (strstr(request_buffer, "POST /search") != NULL) {
 
@@ -78,6 +113,14 @@ static void handel_client(server_data_t *server) {
       send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
       return;
     }
+
+    // Auth Guardrail
+    if (!authenticate_request(request_buffer, req->db_name)) {
+            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
+            free_search_request(req);
+            return;
+        }
+
 
     FlatDb_t *db = db_open(req->db_name, req->dimension, 0);
     if (db == NULL) {
@@ -157,6 +200,15 @@ static void handel_client(server_data_t *server) {
       return;
     }
 
+
+    // Auth guardrail
+    if (!authenticate_request(request_buffer, req->db_name)) {
+            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
+            free_insert_request(req);
+            return;
+        }
+
+
     FlatDb_t *db = db_open(req->db_name, req->dimension, 0);
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
@@ -204,6 +256,15 @@ static void handel_client(server_data_t *server) {
       send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
       return;
     }
+    
+
+    //Auth Guardrail
+    if (!authenticate_request(request_buffer, req->db_name)) {
+            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
+            free_train_request(req);
+            return;
+        }
+
 
     FlatDb_t *db = db_open(req->db_name, 0, 0);
     if (db == NULL) {

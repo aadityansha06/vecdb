@@ -6,11 +6,7 @@
 
 #include "../db.h"
 
-typedef struct search{
-    uint64_t id;
-    float calculated_distance;
-    char *metadata;
-} SearchResult_t;
+
 /**
  * @brief Performs an exact nearest neighbor (Flat) search across all records.
  *

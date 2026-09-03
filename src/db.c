@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 /**
  * @file db.c
  * @brief Interface to  handel Dd func including initialization,

@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
+#include <unistd.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,4 +78,17 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata);
 int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
                    uint64_t nprobe, cluster_t *clusters, uint64_t num_clusters,
                    SearchResult_t *out_results);
+
+
+
+
+/**
+ * @brief Opens an existing database. Used by the TCP server. 
+ * Prevents clients from creating new tables.
+ */
+FlatDb_t *db_open(const char *db_name, uint64_t dimension, MetricType metric);
+
+
+
+
 #endif

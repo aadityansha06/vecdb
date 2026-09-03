@@ -3,12 +3,12 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
-
+#include "../include/api-key-generate.h"
 #include "../include/search/baseline-flat.h"
+#include <unistd.h>
 #include <stdlib.h>
-
+#include "../include/server.h"
 int run_tui(int argc, char *argv[]) {
-  int exit_request = 0;
   FlatDb_t *master_db = NULL;
   if (argc == 1) {
     printf("Welcome to originDB\n");
@@ -20,32 +20,74 @@ int run_tui(int argc, char *argv[]) {
       printf("\norigin> ");
 
       char command[256];
-      if (fgets(command, sizeof(command), stdin) == NULL)
-        break;
+      if (fgets(command, sizeof(command), stdin) == NULL) break;
       command[strcspn(command, "\n")] = '\0';
 
       char cmd[20], arg[20], db_name[200];
-      uint64_t dimension, initial_capacity;
-      int metric_int;
+      uint64_t dimension = 0, initial_capacity = 0;
+      int metric_int = 0;
 
       int ret = sscanf(command, "%s %s %s %" SCNu64 " %" SCNu64 " %d", cmd, arg,
                        db_name, &dimension, &initial_capacity, &metric_int);
 
-      if (ret == 6 && strcmp(cmd, "origin") == 0 && strcmp(arg, "init") == 0) {
+      // --- 1. NEW SERVER ROUTE ---
+      if (ret >= 3 && strcmp(cmd, "origin") == 0 && strcmp(arg, "server") == 0) {
+          int port = atoi(db_name);
+          if (port <= 0) port = 8080; // Fallback to 8080 if parsing fails
+          
+          printf("Launching OriginDB TCP Server on port %d...\n", port);
+          server_init(port); // This will block and run the server loop
+          continue;
+      }
+
+      // --- 2. FIXED INIT ROUTE ---
+      else if (ret == 6 && strcmp(cmd, "origin") == 0 && strcmp(arg, "init") == 0) {
+        
+        // FIX: Declare and format the folder path before checking it!
+        char folder_path[256];
+        snprintf(folder_path, sizeof(folder_path), "origin_data/%s", db_name);
+        
+        if (access(folder_path, F_OK) == 0) {
+            printf("Error: Table '%s' already exists. Use 'origin open' instead.\n", db_name);
+            continue;
+        }
 
         if (master_db != NULL) {
-          printf("Database already initialized!\n");
+          printf("Database already initialized in this session!\n");
           continue;
         }
 
-        master_db = db_init(db_name, dimension, initial_capacity,
-                            (MetricType)metric_int);
+        master_db = db_init(db_name, dimension, initial_capacity, (MetricType)metric_int);
 
         if (master_db != NULL) {
-          printf("Success: Initialized DB '%s' (Dim: %" PRIu64 ", Cap: %" PRIu64
-                 ")\n",
-                 db_name, dimension, initial_capacity);
-        }
+          char new_api_key[65];
+          generate_api_key(new_api_key);
+          save_api_key(db_name, new_api_key);
+
+          printf("\n================================================================\n");
+          printf("SUCCESS: Initialized DB '%s'\n", db_name);
+          printf("Your API Key for '%s' is:\n%s\n", db_name, new_api_key);
+          printf("================================================================\n\n");
+        }   
+      }// --- THE MISSING OPEN COMMAND ---
+      // Expected usage: origin open <db_name> <dimension> <metric>
+      else if (ret >= 5 && strcmp(cmd, "origin") == 0 && strcmp(arg, "open") == 0) {
+          
+          if (master_db != NULL) {
+              printf("Error: A database is already open in this session!\n");
+              continue;
+          }
+
+          // Use the db_open guardrail we wrote for the server!
+          master_db = db_open(db_name, dimension, (MetricType)metric_int);
+          
+          if (master_db != NULL) {
+              printf("\n================================================================\n");
+              printf("SUCCESS: Opened existing DB '%s' (Dim: %" PRIu64 ")\n", db_name, dimension);
+              printf("================================================================\n\n");
+          } else {
+              printf("Error: Table '%s' does not exist. Use 'origin init' first.\n", db_name);
+          }
       }else if (ret >= 3 && strcmp(cmd, "origin") == 0 &&
                strcmp(arg, "insert") == 0) {
         if (master_db == NULL) {
