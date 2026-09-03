@@ -15,6 +15,28 @@
  * including search and deletion for vector database operations.
  */
 
+
+/**
+ * @brief Opens an existing database. Used by the TCP server. 
+ * Prevents clients from creating new tables.
+ */
+
+FlatDb_t *db_open(const char *db_name, uint64_t dimension, MetricType metric) {
+    char folder_path[256];
+    snprintf(folder_path, sizeof(folder_path), "origin_data/%s", db_name);
+
+    if (access(folder_path, F_OK) == -1) {
+        printf("Server Error: Client attempted to open non-existent table '%s'.\n", db_name);
+        return NULL;  
+    }
+
+    return db_init(db_name, dimension, 10, metric); 
+}
+
+
+
+
+
 /**
  * @brief function signature to initilaize vectordb.
  *
@@ -26,6 +48,10 @@
  * @param metrictype to calculate similarity between two vectors.
  *
  */
+
+
+
+
 FlatDb_t *db_init(const char *db_name, uint64_t dimension,
                   uint64_t initial_capacity, MetricType metric) {
 
