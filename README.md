@@ -7,11 +7,16 @@ V-0.1 soon
 ```md
 # OriginDB
 
-A custom, high-performance, disk-backed Approximate Nearest Neighbor (ANN) vector database built entirely from scratch in C.
+A custom, high-performance, disk-backed Approximate Nearest Neighbor (ANN) vector database
+built entirely from scratch in C.
 
 ## Architecture
 
-OriginDB completely bypasses high-level wrappers to interact directly with POSIX file I/O. It maps RAM array indices to physical disk `byte_offsets`, allowing the engine to instantly jump around the disk using `fseek()` to fetch targeted vectors for similarity calculations without loading the entire dataset into memory.
+OriginDB completely bypasses high-level wrappers to interact directly with POSIX file I/O.
+ It maps RAM array indices to physical disk `byte_offsets`,
+allowing the engine to instantly jump around the disk using `fseek()`
+to fetch targeted vectors for similarity calculations
+without loading the entire dataset into memory.
 
 ## Current Features
 
