@@ -39,4 +39,12 @@ I'll continue to work on it, implementing SIMD, CUDA, HNSW, and many more optimi
 - **API Key Auth:** per-table key generation and verification on server requests.
 - **Interactive TUI + One-Shot CLI:** REPL for exploring a table, or run a single command directly from the shell.
 
+## Design Writeups
+
+- Storage Architecture Design for Targeted Disk Reads in ANN Vector Search in C
+  [Medium](https://medium.com/@vermaadityansh/storage-architecture-design-for-targeted-disk-reads-in-ann-vector-search-7159e5b46453) | [write-up](Storage-architecture.md)
+- Per Table Key Authentication Design for a Multi Tenant Vector Database in C
+  [Medium](https://medium.com/@vermaadityansh/per-table-key-authentication-design-for-a-multi-tenant-vector-database-in-c-51f2b834df82) | [write-up](Auth-design.md)
+
+
 Feel free to contribute and connect at vermaadityansh@gmail.com or on X (https://x.com/aadityansha_06)
