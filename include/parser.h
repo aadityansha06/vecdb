@@ -48,6 +48,14 @@ typedef struct {
   uint64_t max_iterations;
 } train_req_t;
 
+
+typedef struct {
+    char db_name[100];
+    uint32_t id;
+} delete_req_t;
+
+
+
 /**
  * @brief Parses a JSON string into a search request struct.
  *
@@ -98,5 +106,10 @@ train_req_t *parse_train_request(const char *json_body);
  * @brief Frees all memory associated with a train request.
  */
 void free_train_request(train_req_t *req);
+
+
+delete_req_t *parse_delete_request(const char *json_body);
+void free_delete_request(delete_req_t *req);
+
 
 #endif

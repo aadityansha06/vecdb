@@ -24,6 +24,13 @@
  * Prevents clients from creating new tables.
  */
 
+
+
+
+
+
+
+
 /* @GUARDRAIL for Sanitizing input
  *
  */
@@ -104,7 +111,6 @@ FlatDb_t *db_init(const char *db_name, uint64_t dimension,
     free(db);
     return NULL;
   }
-
 
   db->storage = storage_init(db_name);
   if (db->storage == NULL) {
@@ -327,4 +333,34 @@ void db_close(FlatDb_t *db) {
   }
 
   free(db);
+}
+
+int db_delete(FlatDb_t *db, uint64_t id) {
+
+    if (db == NULL || db->storage == NULL || db->storage->fp == NULL)
+    return -1;
+
+  for (uint64_t i = 0; i < db->count; i++) {
+    if (db->records[i].id == id && !db->records[i].is_deleted) {
+
+      db->records[i].is_deleted = true;
+
+      long flag_offset = db->records[i].byte_offset + sizeof(uint32_t);
+
+      if (fseek(db->storage->fp, flag_offset, SEEK_SET) != 0) {
+        perror("Failed to seek to delete flag on disk");
+        return -1;
+      }
+
+      bool deleted_flag = true;
+      if (fwrite(&deleted_flag, sizeof(bool), 1, db->storage->fp) != 1) {
+        perror("Failed to write delete flag to disk");
+        return -1;
+      }
+
+      fflush(db->storage->fp);
+      return 0;
+    }
+  }
+  return -1;
 }

@@ -10,11 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-typedef struct storage {
-  char file_name[203];
-  FILE *fp;
 
-} storage_t;
 
 storage_t *storage_init(const char *table_name) {
   storage_t *storage = (storage_t *)malloc(sizeof(struct storage));

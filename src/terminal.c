@@ -344,6 +344,35 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     free(results);
     return TUI_CONTINUE;
   }
+  /* --- delete --- */
+  if (strcmp(arg, "delete") == 0) {
+    if (*master_db == NULL) {
+      printf("Error: No database open. Run 'origin init ...' or 'origin open ...' first.\n");
+      return TUI_CONTINUE;
+    }
+    
+    if (words != 3) {
+      printf("Usage: origin delete <id>\n");
+      printf("  example: origin delete 42\n");
+      return TUI_CONTINUE;
+    }
+
+    uint64_t id_to_delete; 
+    
+    if (sscanf(command, "%*s %*s  %" PRIu64"\n", &id_to_delete) < 1) {
+      printf("Error: <id> must be a valid positive integer.\n");
+      printf("Usage: origin delete <id>\n");
+      return TUI_CONTINUE;
+    }
+
+    if (db_delete(*master_db, id_to_delete) == 0) {
+      printf("SUCCESS: Vector ID  %" PRIu64"  has been permanently marked as deleted on disk.\n", id_to_delete);
+    } else {
+      printf("Error: Vector ID  %" PRIu64" not found or has already been deleted.\n", id_to_delete);
+    }
+    
+    return TUI_CONTINUE;
+  }
 
   printf("Unknown command 'origin %s'. Try 'origin --help' for the list of "
          "commands.\n",

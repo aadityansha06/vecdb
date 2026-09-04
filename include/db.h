@@ -85,4 +85,7 @@ FlatDb_t *db_open(const char *db_name);
 bool validate_db_name(const char *name);
 void db_close(FlatDb_t *db);
 
+
+int db_delete(FlatDb_t *db, uint64_t id);
+
 #endif

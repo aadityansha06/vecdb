@@ -3,7 +3,16 @@
 #include "search/kmeans.h"
 #include <stdint.h>
 typedef struct Record Record_t;
-typedef struct storage storage_t; // contain file-pointer
+ 
+
+/* @brief contain file-pointer
+ */
+typedef struct storage {
+  char file_name[203];
+  FILE *fp;
+
+} storage_t;
+
 
 storage_t *storage_init(const char* table_name);
 
