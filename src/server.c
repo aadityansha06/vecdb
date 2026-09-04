@@ -1,6 +1,6 @@
 #include "../include/server.h"
 #include <stdbool.h>
-
+#define MAX_TOP_K 10000
 static void handel_client(server_data_t *server);
 static void send_error(server_data_t *server, Client_error err_code,
                        const char *details);
@@ -86,27 +86,84 @@ int server_init(int PORT) {
 }
 
 static void handel_client(server_data_t *server) {
-  char request_buffer[2048];
+char header_buffer[4096] = {0};
+    int header_length = 0;
+    char *body_start = NULL;
 
+    while (header_length < (int)sizeof(header_buffer) - 1) {
+        int bytes = recv(server->clientfd, header_buffer + header_length, 1, 0);
+        if (bytes <= 0) {
+            close(server->clientfd);
+            return;
+        }
+        header_length += bytes;
+        header_buffer[header_length] = '\0';
+        
+        body_start = strstr(header_buffer, "\r\n\r\n");
+        if (body_start != NULL) break;
+    }
+
+    if (body_start == NULL) {
+        close(server->clientfd);         return;
+    }
+
+    int content_length = 0;
+    char *cl_ptr = strstr(header_buffer, "Content-Length: ");
+    if (cl_ptr) {
+        content_length = atoi(cl_ptr + 16);
+    }
+
+    /* @Guardrail: 10MB limit to prevent memory exhaustion attacks
+     */
+    if (content_length == 0 || content_length > 10485760) { 
+        send_error(server, INVALID_PARAMETER, "Missing or excessive Content-Length header.");
+        return;
+    }
+
+    char *http_body = calloc(content_length + 1, 1);
+    if (http_body == NULL) {
+        send_error(server, INTERNAL_ERROR, "Out of memory allocating request body.");
+        return;
+    }
+
+    int headers_size = (body_start - header_buffer) + 4;
+    int leftover_body_bytes = header_length - headers_size;
+    int body_bytes_read = 0;
+    
+    if (leftover_body_bytes > 0) {
+        memcpy(http_body, body_start + 4, leftover_body_bytes);
+        body_bytes_read += leftover_body_bytes;
+    }
+
+    while (body_bytes_read < content_length) {
+        int bytes = recv(server->clientfd, http_body + body_bytes_read, content_length - body_bytes_read, 0);
+        if (bytes <= 0) break;
+        body_bytes_read += bytes;
+    }
   int bytes_read =
-      recv(server->clientfd, request_buffer, sizeof(request_buffer) - 1, 0);
+      recv(server->clientfd, header_buffer, sizeof(header_buffer) - 1, 0);
 
   if (bytes_read <= 0) {
     close(server->clientfd);
     return;
   }
-  request_buffer[bytes_read] = '\0';
+  header_buffer[bytes_read] = '\0';
+
+
+
+
+
+    /*  @Route function
+     *  TODO: isolate receive/header_buffer() from handel_client
+     *  will do when free
+     *
+     */
+
 
   // Search Route
-  if (strstr(request_buffer, "POST /search") != NULL) {
+  if (strstr(header_buffer, "POST /search") != NULL) {
 
-    char *http_body = strstr(request_buffer, "\r\n\r\n");
-    if (http_body != NULL) {
-      http_body += 4;
-    } else {
-      send_error(server, INVALID_PARAMETER, "Missing HTTP body.");
-      return;
-    }
+    
 
     search_req_t *req = parse_search_request(http_body);
     if (req == NULL) {
@@ -115,22 +172,39 @@ static void handel_client(server_data_t *server) {
     }
 
     // Auth Guardrail
-    if (!authenticate_request(request_buffer, req->db_name)) {
+    if (!authenticate_request(header_buffer, req->db_name)) {
             send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
             free_search_request(req);
             return;
         }
 
 
-    FlatDb_t *db = db_open(req->db_name, req->dimension, 0);
+    FlatDb_t *db = db_open(req->db_name);
+    if (db->dimension != req->dimension) {
+            send_error(server, INVALID_PARAMETER, "Vector dimension does not match table configuration.");
+            db_close(db);
+            return;
+        }
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
       free_search_request(req);
       return;
     }
 
-    SearchResult_t *results =
-        (SearchResult_t *)malloc(req->top_k * sizeof(SearchResult_t));
+if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
+        send_error(server, INVALID_PARAMETER, "top_k must be between 1 and 10000.");
+        free_search_request(req);
+        db_close(db); 
+        return;
+    }
+
+    SearchResult_t *results = (SearchResult_t *)malloc(req->top_k * sizeof(SearchResult_t));
+    if (results == NULL) {
+        send_error(server, INTERNAL_ERROR, "Out of memory allocating search results.");
+        free_search_request(req);
+        db_close(db);
+        return;
+    }
 
     if (req->use_ann) {
       uint64_t loaded_k;
@@ -181,18 +255,14 @@ static void handel_client(server_data_t *server) {
 
     free(results);
     free_search_request(req);
+    db_close(db);
+    free(http_body);
     close(server->clientfd);
 
-  } else if (strstr(request_buffer, "POST /insert") != NULL) {
+  } else if (strstr(header_buffer, "POST /insert") != NULL) {
     // insert_data();
 
-    char *http_body = strstr(request_buffer, "\r\n\r\n");
-    if (http_body != NULL) {
-      http_body += 4;
-    } else {
-      send_error(server, INVALID_PARAMETER, "Missing HTTP body.");
-      return;
-    }
+    
 
     insert_req_t *req = parse_insert_request(http_body);
     if (req == NULL) {
@@ -202,14 +272,19 @@ static void handel_client(server_data_t *server) {
 
 
     // Auth guardrail
-    if (!authenticate_request(request_buffer, req->db_name)) {
+    if (!authenticate_request(header_buffer, req->db_name)) {
             send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
             free_insert_request(req);
             return;
         }
 
 
-    FlatDb_t *db = db_open(req->db_name, req->dimension, 0);
+ FlatDb_t *db = db_open(req->db_name);
+    if (db->dimension != req->dimension) {
+            send_error(server, INVALID_PARAMETER, "Vector dimension does not match table configuration.");
+            db_close(db);
+            return;
+        }
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
       free_insert_request(req);
@@ -219,6 +294,7 @@ static void handel_client(server_data_t *server) {
     if (db_insert(db, req->id, req->vector, req->metadata) < 0) {
       send_error(server, INTERNAL_ERROR, "Failed to write record to disk.");
       free_insert_request(req);
+      db_close(db);
       return;
     }
 
@@ -238,18 +314,14 @@ static void handel_client(server_data_t *server) {
     send(server->clientfd, response, strlen(response), 0);
 
     free_insert_request(req);
+    db_close(db);
+    free(http_body);
     close(server->clientfd);
 
-  } else if (strstr(request_buffer, "POST /train") != NULL) {
+  } else if (strstr(header_buffer, "POST /train") != NULL) {
     // train_db();
 
-    char *http_body = strstr(request_buffer, "\r\n\r\n");
-    if (http_body != NULL) {
-      http_body += 4;
-    } else {
-      send_error(server, INVALID_PARAMETER, "Missing HTTP body.");
-      return;
-    }
+   
 
     train_req_t *req = parse_train_request(http_body);
     if (req == NULL) {
@@ -259,17 +331,18 @@ static void handel_client(server_data_t *server) {
     
 
     //Auth Guardrail
-    if (!authenticate_request(request_buffer, req->db_name)) {
+    if (!authenticate_request(header_buffer, req->db_name)) {
             send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
             free_train_request(req);
             return;
         }
 
 
-    FlatDb_t *db = db_open(req->db_name, 0, 0);
+FlatDb_t *db = db_open(req->db_name);
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
       free_train_request(req);
+      db_close(db);
       return;
     }
 
@@ -312,6 +385,8 @@ static void handel_client(server_data_t *server) {
     }
     free(trained_clusters);
     free_train_request(req);
+    db_close(db);
+    free(http_body);
     close(server->clientfd);
 
   } else {

@@ -106,18 +106,13 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
 /*                        Map RAM indices to physical disk offsets                                                                               
  **/
 for (int i = 0; i < k; i++) {
-    // Allocate the array to hold the disk locations
     total_cluster[i].byte_offsets = (uint64_t *)malloc(total_cluster[i].count * sizeof(uint64_t));
     
-    // Loop through every vector that got assigned to this cluster
-    for (int j = 0; j < total_cluster[i].count; j++) {
-        // 1. Get the RAM index (e.g., Vector 42)
+    for (uint64_t j = 0; j < total_cluster[i].count; j++) {
         uint64_t ram_idx = total_cluster[i].record_index[j];
         
-        // 2. Look up Vector 42 in your master record array and grab its disk location
         uint64_t physical_offset = record[ram_idx].byte_offset;
         
-        // 3. Store that physical offset in the cluster
         total_cluster[i].byte_offsets[j] = physical_offset;
     }
 }

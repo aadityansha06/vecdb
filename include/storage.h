@@ -69,7 +69,7 @@ int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset, Record_t *
 
 
 
-
+void storage_close(storage_t *storage);
 
 #endif
 

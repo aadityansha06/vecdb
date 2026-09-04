@@ -223,7 +223,7 @@ static int handle_command(char *command, FlatDb_t **master_db) {
       return TUI_CONTINUE;
     }
 
-    *master_db = db_open(db_name, dimension, (MetricType)metric_int);
+    *master_db = db_open(db_name);
 
     if (*master_db != NULL) {
       printf("\n================================================================\n");
