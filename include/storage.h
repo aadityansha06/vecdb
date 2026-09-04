@@ -67,5 +67,9 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k, uint64_t dime
  */
 int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset, Record_t *record, uint64_t dimension);
 
+
+
+
+
 #endif
 
