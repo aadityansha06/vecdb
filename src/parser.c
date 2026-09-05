@@ -166,8 +166,36 @@ train_req_t *req = calloc(1, sizeof(train_req_t));
   return req;
 }
 
+
 void free_train_request(train_req_t *req) {
   if (req) {
     free(req);
   }
 }
+
+delete_req_t *parse_delete_request(const char *json_body) {
+    cJSON *json = cJSON_Parse(json_body);
+    if (json == NULL) return NULL; 
+
+    cJSON *db_name = cJSON_GetObjectItemCaseSensitive(json, "db_name");
+    cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "id");
+
+    if (!cJSON_IsString(db_name) || !cJSON_IsNumber(id)) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+
+    delete_req_t *req = calloc(1, sizeof(delete_req_t));
+    strncpy(req->db_name, db_name->valuestring, sizeof(req->db_name) - 1);
+    req->db_name[sizeof(req->db_name) - 1] = '\0';
+    req->id = (uint32_t)id->valuedouble;
+
+    cJSON_Delete(json);
+    return req;
+}
+
+void free_delete_request(delete_req_t *req) {
+    if (req) free(req);
+}
+
+

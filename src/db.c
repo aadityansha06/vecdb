@@ -1,6 +1,6 @@
 #include "../include/db.h"
 #include "../include/storage.h"
-// #include <cstddef>
+#include "../include/pending-delete.h"
 #include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -155,6 +155,7 @@ FlatDb_t *db_init(const char *db_name, uint64_t dimension,
 
   db->calculate_distance =
       get_distance(metric); // Returning the pointer of static function
+db->pending_deletes = load_pending_deletes(db_name, &db->pending_count);
 
   return db;
 }
@@ -265,7 +266,7 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
     if (storage_fetch_by_offset(db->storage, byte_offset, &temp_record,
                                 db->dimension) == 1) {
 
-      if (temp_record.is_deleted) {
+     if (temp_record.is_deleted || is_pending_delete(temp_record.id, db->pending_deletes, db->pending_count)) {
         free(temp_record.vector);
         if (temp_record.metadata)
           free(temp_record.metadata);
@@ -332,6 +333,10 @@ void db_close(FlatDb_t *db) {
 
   if (db->storage != NULL) {
     storage_close(db->storage);
+  }
+
+  if (db->pending_deletes != NULL) {
+      free(db->pending_deletes);
   }
 
   free(db);

@@ -1,4 +1,5 @@
 #include "../include/server.h"
+#include "../include/pending-delete.h"
 #include <pthread.h>
 #include <stdbool.h>
 #define MAX_TOP_K 10000
@@ -14,6 +15,9 @@ int queue_count = 0;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 static pthread_rwlock_t index_lock = PTHREAD_RWLOCK_INITIALIZER;
+static pthread_mutex_t pending_delete_lock = PTHREAD_MUTEX_INITIALIZER;
+
+
 
 static void handel_client(server_data_t *server);
 static void send_error(server_data_t *server, Client_error err_code,
@@ -289,7 +293,7 @@ static void handel_client(server_data_t *server) {
 
     } else {
       flat_search(db->records, db->count, req->dimension, req->query_vector,
-                  req->top_k, db->calculate_distance, results);
+                  req->top_k, db->calculate_distance, results,db->pending_deletes, db->pending_count);
     }
 
     json_payload = serialize_search_results(results, req->top_k);
@@ -383,8 +387,49 @@ static void handel_client(server_data_t *server) {
       free(http_body);
     close(server->clientfd);
 
-  } else if (strstr(header_buffer, "POST /train") != NULL) {
-    // train_db();
+  }else if (strstr(header_buffer, "POST /delete-request") != NULL) {
+       
+    // @temp-delete
+
+        delete_req_t *req = NULL;
+        req = parse_delete_request(http_body);
+        
+        if (req == NULL) {
+            send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
+            goto pending_cleanup;
+        }
+
+        if (!authenticate_request(header_buffer, req->db_name)) {
+            send_error(server, UNAUTHORIZED_ACCESS, "Invalid API key.");
+            goto pending_cleanup;
+        }
+
+        pthread_mutex_lock(&pending_delete_lock);
+        append_pending_delete(req->db_name, req->id);
+        pthread_mutex_unlock(&pending_delete_lock);
+
+    /* @Constant-time Oracle defense: Always say success.
+     */
+        char response[1024];
+        char json_response[] = "{\"status\": \"success\", \"message\": \"Delete request queued.\"}";
+        
+        snprintf(response, sizeof(response),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: %zu\r\n"
+                 "Connection: close\r\n\r\n%s",
+                 strlen(json_response), json_response);
+                 
+        send(server->clientfd, response, strlen(response), 0);
+
+    pending_cleanup:
+        if (req) free_delete_request(req);
+        if (http_body) free(http_body);
+        close(server->clientfd);
+        return;
+    }else if (strstr(header_buffer, "POST /train") != NULL) {
+   
+        // train_db();
     train_req_t *req = NULL;
     FlatDb_t *db = NULL;
     cluster_t *trained_clusters = NULL;

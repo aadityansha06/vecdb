@@ -9,13 +9,10 @@ V-0.1 soon
 A custom, high-performance, disk-backed Approximate Nearest Neighbor (ANN) vector database
 built entirely from scratch in C.
 
-## Architecture
-
-OriginDB completely bypasses high-level wrappers to interact directly with POSIX file I/O.
- It maps RAM array indices to physical disk `byte_offsets`,
-allowing the engine to instantly jump around the disk using `fseek()`
-to fetch targeted vectors for similarity calculations
-without loading the entire dataset into memory.
+Its main standout feature is a security-first deferred delete architecture — deletion
+requests can be sent over the network, but an actual deletion can only ever be carried
+out locally, by a human, on the server itself. Read the full design here:
+[Deferred Delete Architecture](write-up/Delete-architecture.md).
 
 ### Read Docs to get started
 
@@ -24,11 +21,16 @@ without loading the entire dataset into memory.
 
 # Why this exists
 
-This started as a toy project to learn how to write a scalable C codebase and implement low level memory management and optimize performance. There isn't anything unique I'm solving in it, and pretending otherwise would just be bluffing. There are excellent vector databases already (pgvector, Faiss, sqlite vec, Qdrant...).
+This started as a toy project to learn how to write a scalable C codebase and implement low level memory management and optimize performance. There wasn't anything unique I'm solving in it, and pretending otherwise would just be bluffing. There are excellent vector databases already (pgvector, Faiss, sqlite vec, Qdrant...).
 
-What I actually own is the engineering of it. I wrote a disk backed ANN search engine from scratch in C, my own binary file format, manual fseek byte offset indexing, k means clustering by hand, no libraries doing the hard parts for me.
-
-I'll continue to work on it, implementing SIMD, CUDA, HNSW, and many more optimizations to make it more robust and scalable. If anyone is interested, they can join and work on it. Also if anyone has any idea where we should take this, the suggestion would be appreciated too.
+While building this, I left the server's API without a delete endpoint, mostly because
+I just hadn't gotten to it yet. But that gap ended up raising a real question for me,
+why not make this the main feature? With most databases, if an API key ever leaks, an
+attacker can delete everything instantly, no extra steps needed. So instead of treating
+the missing endpoint as something to eventually patch over, I kept deletion completely
+isolated from the backend and only allowed it locally, through SSH, on the server
+itself. Also if anyone has any idea where we should take this, the suggestion would
+be appreciated too.
 
 
 ## Current Features
@@ -39,8 +41,9 @@ I'll continue to work on it, implementing SIMD, CUDA, HNSW, and many more optimi
 - **Persistent IVF Index:** trained clusters are serialized to disk and reloaded, so the index survives a restart without retraining.
 - **Pluggable Distance Metrics:** cosine and euclidean, selected per table via a function pointer router.
 - **Auto-Growing Record Table:** in-memory record array doubles capacity on overflow instead of a fixed cap.
-- **TCP Server with JSON API:** POST /search, /insert, /train routes over raw sockets, parsed with cJSON.
+- **TCP Server with JSON API:** POST /search, /insert, /train, /delete-request routes over raw sockets, parsed with cJSON.
 - **API Key Auth:** per-table key generation and verification on server requests.
+- **Deferred Delete Queue:** deletions can be requested over the network but can only ever be executed locally, with an explicit human confirmation — a leaked API key can never delete data on its own.
 - **Interactive TUI + One-Shot CLI:** REPL for exploring a table, or run a single command directly from the shell.
 
 ## Design Writeups
@@ -52,5 +55,8 @@ I'll continue to work on it, implementing SIMD, CUDA, HNSW, and many more optimi
 
 - Scaling VectorDb written in C to Handle Concurrent Requests
 [Medium](https://medium.com/@vermaadityansh/scaling-vectordb-written-in-c-to-handle-concurrent-requests-2fceb641e0c0?sharedUserId=vermaadityansh) | [github-read](write-up/originDb-concurrency.md)
+
+- Deferred Delete Architecture: Why a Leaked API Key Can Never Delete Your Data
+  [github-read](write-up/Delete-architecture.md)
 
 Feel free to contribute and connect at vermaadityansh@gmail.com or on X (https://x.com/aadityansha_06)

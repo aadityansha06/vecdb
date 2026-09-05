@@ -13,10 +13,12 @@ CORE_SRCS = $(SRC_DIR)/db.c \
             $(SRC_DIR)/distance.c \
             $(SRC_DIR)/server.c \
             $(SRC_DIR)/parser.c \
+            $(SRC_DIR)/pending-delete.c \
             $(SRC_DIR)/cJSON.c \
             $(SRC_DIR)/api-key-generate.c \
             $(SEARCH_DIR)/baseline-flat.c \
             $(SEARCH_DIR)/kmeans.c
+
 CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 MAIN_SRCS = $(SRC_DIR)/main.c $(SRC_DIR)/terminal.c

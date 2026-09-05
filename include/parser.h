@@ -51,7 +51,7 @@ typedef struct {
 
 typedef struct {
     char db_name[100];
-    uint32_t id;
+    uint64_t id;
 } delete_req_t;
 
 

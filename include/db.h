@@ -38,6 +38,9 @@ typedef struct {
   Record_t *records;
   Distance_func calculate_distance;
   storage_t *storage;
+
+  uint64_t *pending_deletes; 
+    uint64_t pending_count;
 } FlatDb_t; // Master struct
 
 typedef struct search {

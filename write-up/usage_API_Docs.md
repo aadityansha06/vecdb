@@ -21,9 +21,17 @@ Start the engine:
 | `origin open <name>` | Open an existing table in this session. Dimension and metric are read automatically from the table's own stored config — you don't (and can't) override them here. |
 | `origin insert <id> [metadata]` | Insert a vector into the open table. Prompts for the vector's floats afterward. `metadata` is a single word (no spaces). |
 | `origin search <top_k>` | Exact nearest-neighbor search against the open table. Prompts for the query vector's floats. |
-| `origin delete <id>` | **Admin-only, by design.** Marks a record as deleted (tombstoned — the vector bytes stay on disk, only a flag flips) both in memory and on disk. There is intentionally no network route for this: a leaked or compromised API key can pollute a table via `/insert`, but can never delete data from it. |
+| `origin delete <id>` | **Admin-only, immediate.** Marks a record as deleted (tombstoned — the vector bytes stay on disk, only a flag flips) both in memory and on disk, right away. Use this for ad-hoc local cleanup. |
+| `origin process-deletes <table>` | **Admin-only, batch.** Executes every delete request currently queued for `<table>` by the network's `/delete-request` endpoint (see §2.4). Shows the number of pending records and asks for `y`/`n` confirmation before touching anything. Ids that don't correspond to a real record, or were already deleted, are silently skipped and reported as ignored in the summary. Clears the queue afterward. |
 | `origin server [port]` | Start the TCP server (blocking; default port 8080). |
 | `origin --help` / `origin --exit` | Help / quit. |
+
+Deletion in OriginDB is split into two steps by design: **requesting** a deletion
+can be done over the network with a normal API key, but **executing** one can only
+happen here, locally, with an explicit human confirmation. See
+[`Delete-architecture.md`](Delete-architecture.md) for the full reasoning — in
+short, a leaked API key can queue delete requests, but can never cause an actual
+deletion on its own.
 
 Example session:
 ```
@@ -48,8 +56,8 @@ factor that into your workflow if you plan to prune records regularly.
 ## 2. Network API (Application Operations)
 
 Once the server is listening, backend applications interact with it over raw HTTP
-POST requests — three routes only: `/insert`, `/search`, `/train`. There is
-deliberately no `/delete` route.
+POST requests — four routes: `/insert`, `/search`, `/train`, and
+`/delete-request`. There is no route that performs an actual deletion — see §2.4.
 
 ### Authentication
 
@@ -109,6 +117,34 @@ get a `400` with a clear message, rather than a corrupted table.
   — pathological input that never converges could in principle run past it. In
   practice this is rare, but if you're training on adversarial or untrusted data,
   keep an eye on it.
+
+### `POST /delete-request`
+```json
+{
+  "db_name": "movies",
+  "id": 1
+}
+```
+This does not delete anything. It queues the id for review — the actual deletion
+only happens if an administrator runs `origin process-deletes movies` locally and
+confirms it. See [`Delete-architecture.md`](Delete-architecture.md) for why the
+endpoint is built this way.
+
+A few things worth knowing about this route specifically:
+
+- Only a single `id` per request. There's no way to request a range, a list, or a
+  wildcard delete — the request schema simply can't express anything broader than
+  one record.
+- The response is identical whether or not `id` actually corresponds to a real
+  record. This is deliberate: checking existence at request time and replying
+  differently would let someone holding a valid key work out which ids are real
+  just by watching how the server responds (or how long it takes to respond),
+  without ever seeing the data itself. Existence is only resolved later, locally,
+  when an administrator processes the queue.
+- Queued requests take effect on search results immediately, well before anyone
+  runs `process-deletes`. A record with a pending delete request stops showing up
+  in `/search` right away, even though its bytes and on-disk flag haven't changed
+  yet.
 
 ### Client examples
 
@@ -192,9 +228,11 @@ export async function searchMovies(queryVector: number[]) {
 
 ## 5. Known Limitations — read before going live
 
-- **No `/delete` over the network, by design.** Deletion is admin-CLI only, and
-  requires briefly stopping the server (see §1). Plan around this if you need to
-  prune records on a schedule.
+- **No route performs an actual deletion, by design.** `/delete-request` only
+  queues a request; only `origin process-deletes` (local, confirmed by a human)
+  ever writes a real deletion to disk. Plan your cleanup workflow around running
+  that command periodically rather than expecting deletes to take effect the
+  moment a request is sent — see [`Delete-architecture.md`](Delete-architecture.md).
 - **Deletes are tombstones, not physical erasure.** Deleted vectors' bytes remain
   on disk; only a flag flips. There is currently no compaction step to reclaim
   space or shrink the file.

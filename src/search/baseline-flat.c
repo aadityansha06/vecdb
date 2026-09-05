@@ -1,4 +1,5 @@
 #include "../../include/search/baseline-flat.h"
+#include "../../include/pending-delete.h"
 #include <stdint.h>
 #include <math.h>
 
@@ -10,7 +11,7 @@
 
 
 
-int flat_search(Record_t *records, uint64_t count, uint64_t dimension, float *query_vector, uint64_t top_k, Distance_func calculate_distance, SearchResult_t *out_results){
+int flat_search(Record_t *records, uint64_t count, uint64_t dimension, float *query_vector, uint64_t top_k, Distance_func calculate_distance, SearchResult_t *out_results,uint64_t *pending_deletes,uint64_t pending_count){
 
 
 
@@ -20,8 +21,10 @@ for (uint64_t i=0; i<top_k; i++) {
 }
 
 for (uint64_t i=0; i<count; i++) {
-         if (records[i].is_deleted) continue;
-   float dis = calculate_distance(dimension,records[i].vector,query_vector);
+    if (records[i].is_deleted || is_pending_delete(records[i].id, pending_deletes, pending_count)) {
+            continue;
+        }
+    float dis = calculate_distance(dimension,records[i].vector,query_vector);
 
   if (dis < out_results[top_k - 1].calculated_distance) {
             

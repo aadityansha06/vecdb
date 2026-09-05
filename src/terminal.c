@@ -1,6 +1,7 @@
 #include "../include/terminal.h"
 #include "../include/api-key-generate.h"
 #include "../include/db.h"
+#include "../include/pending-delete.h"
 #include "../include/search/baseline-flat.h"
 #include "../include/server.h"
 #include <ctype.h>
@@ -325,7 +326,8 @@ static int handle_command(char *command, FlatDb_t **master_db) {
 
     flat_search((*master_db)->records, (*master_db)->count,
                 (*master_db)->dimension, q_vec, top_k,
-                (*master_db)->calculate_distance, results);
+                (*master_db)->calculate_distance, results,
+                (*master_db)->pending_deletes, (*master_db)->pending_count);
 
     printf("\n--- Top %u Results ---\n", top_k);
     for (uint32_t i = 0; i < top_k; i++) {
@@ -338,43 +340,96 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     free(results);
     return TUI_CONTINUE;
   }
-  /*@Cmd-Delete */
-    if (strcmp(arg, "delete") == 0) {
-      if (*master_db == NULL) {
-        printf("Error: No database open. Run 'origin init ...' or 'origin open "
-               "...' first.\n");
-        return TUI_CONTINUE;
-      }
-
-      if (words != 3) {
-        printf("Usage: origin delete <id>\n");
-        printf("  example: origin delete 42\n");
-        return TUI_CONTINUE;
-      }
-
-      uint64_t id_to_delete;
-
-      if (sscanf(command, "%*s %*s %" SCNu64, &id_to_delete) < 1) {
-        printf("Error: <id> must be a valid positive integer.\n");
-        printf("Usage: origin delete <id>\n");
-        return TUI_CONTINUE;
-      }
-
-      if (db_delete(*master_db, id_to_delete) == 0) {
-        printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n",
-               id_to_delete);
-      } else {
-        printf("Error: Vector ID %" PRIu64
-               " not found, already deleted, or disk write failed.\n",
-               id_to_delete);
-      }
-
+  /*@Cmd-Delete (Manual CLI Delete) */
+if (strcmp(arg, "delete") == 0) {
+    if (*master_db == NULL) {
+      printf("Error: No database open. Run 'origin init ...' or 'origin open ...' first.\n");
+      return TUI_CONTINUE;
+    }
+    
+    if (words != 3) {
+      printf("Usage: origin delete <id>\n");
+      printf("  example: origin delete 42\n");
       return TUI_CONTINUE;
     }
 
-  printf("Unknown command 'origin %s'. Try 'origin --help' for the list of "
-         "commands.\n",
-         arg);
+    uint64_t id_to_delete; 
+    
+    if (sscanf(command, "%*s %*s %" SCNu64, &id_to_delete) < 1) {
+      printf("Error: <id> must be a valid positive integer.\n");
+      printf("Usage: origin delete <id>\n");
+      return TUI_CONTINUE;
+    }
+
+    if (db_delete(*master_db, id_to_delete) == 0) {
+      printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n", id_to_delete);
+    } else {
+      printf("Error: Vector ID %" PRIu64 " not found, already deleted, or disk write failed.\n", id_to_delete);
+    }
+    
+    return TUI_CONTINUE;
+  }
+
+  /*@-process-deletes (Queue Execution) */
+  if (strcmp(arg, "process-deletes") == 0) {
+    if (words != 3) {
+      printf("Usage: origin process-deletes <table_name>\n");
+      printf("  example: origin process-deletes movies\n");
+      return TUI_CONTINUE;
+    }
+
+    uint64_t pending_count = 0;
+    uint64_t *pending_ids = load_pending_deletes(db_name, &pending_count);
+
+    if (pending_count == 0 || pending_ids == NULL) {
+      printf("No pending delete requests found for table '%s'.\n", db_name);
+      if (pending_ids) free(pending_ids);
+      return TUI_CONTINUE;
+    }
+
+    printf("\n[WARNING] %" PRIu64 " records are queued for deletion in table '%s'.\n", pending_count, db_name);
+    printf("Proceed with permanent disk deletion? (y/n): ");
+    
+    char confirm;
+    if (scanf(" %c", &confirm) != 1) confirm = 'n';
+    
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+
+    if (confirm == 'y' || confirm == 'Y') {
+      
+      FlatDb_t *temp_db = db_open(db_name);
+      if (temp_db == NULL) {
+        printf("Error: Could not open table '%s'. It may be corrupted or missing.\n", db_name);
+        free(pending_ids);
+        return TUI_CONTINUE;
+      }
+
+      uint64_t success_count = 0;
+      for (uint64_t i = 0; i < pending_count; i++) {
+        if (db_delete(temp_db, (uint64_t)pending_ids[i]) == 0) {
+          success_count++;
+        }
+      }
+
+      db_close(temp_db);
+      clear_pending_deletes(db_name);
+
+      printf("SUCCESS: Executed %" PRIu64 " actual deletions. (%" PRIu64 " invalid or already-deleted IDs were ignored).\n", 
+             success_count, pending_count - success_count);
+      
+      if (*master_db != NULL) {
+          printf("Note: If '%s' is your currently open table, you must restart the terminal to refresh your local RAM state.\n", db_name);
+      }
+    } else {
+      printf("Operation aborted. The queue remains untouched.\n");
+    }
+
+    free(pending_ids);
+    return TUI_CONTINUE;
+  }
+
+  printf("Unknown command 'origin %s'. Try 'origin --help' for the list of commands.\n", arg);
   return TUI_CONTINUE;
 }
 
