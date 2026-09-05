@@ -1,6 +1,20 @@
 #include "../include/server.h"
+#include <pthread.h>
 #include <stdbool.h>
 #define MAX_TOP_K 10000
+
+#define THREAD_POOL_SIZE 32
+#define QUEUE_SIZE 256
+
+int client_queue[QUEUE_SIZE];
+int queue_front = 0;
+int queue_rear = 0;
+int queue_count = 0;
+
+pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+static pthread_rwlock_t index_lock = PTHREAD_RWLOCK_INITIALIZER;
+
 static void handel_client(server_data_t *server);
 static void send_error(server_data_t *server, Client_error err_code,
                        const char *details);
@@ -41,182 +55,227 @@ static bool authenticate_request(const char *request_buffer,
   return verify_api_key(db_name, api_key);
 }
 
+static void *worker_loop(void *arg) {
+  (void)arg;
+
+  while (1) {
+    int clientfd = -1;
+
+    pthread_mutex_lock(&queue_mutex);
+
+    while (queue_count == 0) {
+      pthread_cond_wait(&queue_cond, &queue_mutex);
+    }
+
+    clientfd = client_queue[queue_front];
+    queue_front = (queue_front + 1) % QUEUE_SIZE;
+    queue_count--;
+
+    pthread_mutex_unlock(&queue_mutex);
+
+    if (clientfd >= 0) {
+      server_data_t local_server;
+      local_server.clientfd = clientfd;
+
+      handel_client(&local_server);
+    }
+  }
+  return NULL;
+}
+
 int server_init(int PORT) {
   struct sockaddr_in serveadrr, clientadrr;
-  server_data_t *server = malloc(sizeof(server_data_t));
-  if (server == NULL) {
-      printf("Failed to allocate server memory\n");
-      exit(1);
-  }
+
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     printf("Socket failed ");
-    close(sockfd);
-    exit(0);
+    exit(1);
   }
 
-  serveadrr.sin_family = AF_INET;         /* AF_INET */
-  serveadrr.sin_port = htons(PORT);       /* Port number */
-  serveadrr.sin_addr.s_addr = INADDR_ANY; // Accept any
+  int opt = 1;
+  setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  serveadrr.sin_family = AF_INET;
+  serveadrr.sin_port = htons(PORT);
+  serveadrr.sin_addr.s_addr = INADDR_ANY;
+
   socklen_t len = sizeof(serveadrr);
   if (bind(sockfd, (struct sockaddr *)&serveadrr, len) < 0) {
     printf("Bind failed ");
     close(sockfd);
-    exit(0);
+    exit(1);
   }
 
-  if (listen(sockfd, 3) < 0) {
+  if (listen(sockfd, 128) < 0) {
     printf("Listen failed ");
     close(sockfd);
-    exit(0);
+    exit(1);
   }
-  printf("\n Listing on Port %d...", PORT);
+
+  pthread_t thread_pool[THREAD_POOL_SIZE];
+  for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+    pthread_create(&thread_pool[i], NULL, worker_loop, NULL);
+    pthread_detach(thread_pool[i]);
+  }
+
+  printf("\nOriginDB Thread Pool listening on Port %d...\n", PORT);
   socklen_t client_len = sizeof(clientadrr);
+
   while (1) {
-    server->clientfd =
+    int new_clientfd =
         accept(sockfd, (struct sockaddr *)&clientadrr, &client_len);
-    if (server->clientfd < 0) {
-      printf("\n connection failed");
+    if (new_clientfd < 0) {
       continue;
     }
-    handel_client(server);
+
+    pthread_mutex_lock(&queue_mutex);
+
+    if (queue_count == QUEUE_SIZE) {
+      pthread_mutex_unlock(&queue_mutex);
+      close(new_clientfd);
+      printf("\nServer overloaded, dropping connection.");
+    } else {
+      client_queue[queue_rear] = new_clientfd;
+      queue_rear = (queue_rear + 1) % QUEUE_SIZE;
+      queue_count++;
+
+      pthread_cond_signal(&queue_cond);
+      pthread_mutex_unlock(&queue_mutex);
+    }
   }
 
   return 1;
 }
 
 static void handel_client(server_data_t *server) {
-char header_buffer[4096] = {0};
-    int header_length = 0;
-    char *body_start = NULL;
+  char header_buffer[4096] = {0};
+  int header_length = 0;
+  char *body_start = NULL;
 
-    while (header_length < (int)sizeof(header_buffer) - 1) {
-        int bytes = recv(server->clientfd, header_buffer + header_length, 1, 0);
-        if (bytes <= 0) {
-            close(server->clientfd);
-            return;
-        }
-        header_length += bytes;
-        header_buffer[header_length] = '\0';
-        
-        body_start = strstr(header_buffer, "\r\n\r\n");
-        if (body_start != NULL) break;
+  while (header_length < (int)sizeof(header_buffer) - 1) {
+    int bytes = recv(server->clientfd, header_buffer + header_length, 1, 0);
+    if (bytes <= 0) {
+      close(server->clientfd);
+      return;
     }
+    header_length += bytes;
+    header_buffer[header_length] = '\0';
 
-    if (body_start == NULL) {
-        close(server->clientfd);         return;
-    }
+    body_start = strstr(header_buffer, "\r\n\r\n");
+    if (body_start != NULL)
+      break;
+  }
 
-    int content_length = 0;
-    char *cl_ptr = strstr(header_buffer, "Content-Length: ");
-    if (cl_ptr) {
-        content_length = atoi(cl_ptr + 16);
-    }
-
-    /* @Guardrail: 10MB limit to prevent memory exhaustion attacks
-     */
-    if (content_length == 0 || content_length > 10485760) { 
-        send_error(server, INVALID_PARAMETER, "Missing or excessive Content-Length header.");
-        return;
-    }
-
-    char *http_body = calloc(content_length + 1, 1);
-    if (http_body == NULL) {
-        send_error(server, INTERNAL_ERROR, "Out of memory allocating request body.");
-        return;
-    }
-
-    int headers_size = (body_start - header_buffer) + 4;
-    int leftover_body_bytes = header_length - headers_size;
-    int body_bytes_read = 0;
-    
-    if (leftover_body_bytes > 0) {
-        memcpy(http_body, body_start + 4, leftover_body_bytes);
-        body_bytes_read += leftover_body_bytes;
-    }
-
-    while (body_bytes_read < content_length) {
-        int bytes = recv(server->clientfd, http_body + body_bytes_read, content_length - body_bytes_read, 0);
-        if (bytes <= 0) break;
-        body_bytes_read += bytes;
-    }
-  int bytes_read =
-      recv(server->clientfd, header_buffer, sizeof(header_buffer) - 1, 0);
-
-  if (bytes_read <= 0) {
+  if (body_start == NULL) {
     close(server->clientfd);
     return;
   }
-  header_buffer[bytes_read] = '\0';
 
+  int content_length = 0;
+  char *cl_ptr = strstr(header_buffer, "Content-Length: ");
+  if (cl_ptr) {
+    content_length = atoi(cl_ptr + 16);
+  }
 
+  /* @Guardrail: 10MB limit to prevent memory exhaustion attacks
+   */
+  if (content_length == 0 || content_length > 10485760) {
+    send_error(server, INVALID_PARAMETER,
+               "Missing or excessive Content-Length header.");
+    return;
+  }
 
+  char *http_body = calloc(content_length + 1, 1);
+  if (http_body == NULL) {
+    send_error(server, INTERNAL_ERROR,
+               "Out of memory allocating request body.");
+    return;
+  }
 
+  int headers_size = (body_start - header_buffer) + 4;
+  int leftover_body_bytes = header_length - headers_size;
+  int body_bytes_read = 0;
 
-    /*  @Route function
-     *  TODO: isolate receive/header_buffer() from handel_client
-     *  will do when free
-     *
-     */
+  if (leftover_body_bytes > 0) {
+    memcpy(http_body, body_start + 4, leftover_body_bytes);
+    body_bytes_read += leftover_body_bytes;
+  }
 
+  while (body_bytes_read < content_length) {
+    int bytes = recv(server->clientfd, http_body + body_bytes_read,
+                     content_length - body_bytes_read, 0);
+    if (bytes <= 0)
+      break;
+    body_bytes_read += bytes;
+  }
+
+  /*  @Route function
+   *  TODO: isolate receive/header_buffer() from handel_client
+   *  will do when free
+   *
+   */
 
   // Search Route
   if (strstr(header_buffer, "POST /search") != NULL) {
+    search_req_t *req = NULL;
+    FlatDb_t *db = NULL;
+    SearchResult_t *results = NULL;
+    char *json_payload = NULL;
 
-    
-
-    search_req_t *req = parse_search_request(http_body);
+    req = parse_search_request(http_body);
     if (req == NULL) {
       send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
-      return;
+      goto search_cleanup;
     }
 
-    // Auth Guardrail
+    /*
+     *@Auth Guardrail
+     */
     if (!authenticate_request(header_buffer, req->db_name)) {
-            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
-            free_search_request(req);
-            return;
-        }
+      send_error(server, UNAUTHORIZED_ACCESS,
+                 "Invalid or missing API key for this table.");
+      goto search_cleanup;
+    }
 
-
-    FlatDb_t *db = db_open(req->db_name);
-    if (db->dimension != req->dimension) {
-            send_error(server, INVALID_PARAMETER, "Vector dimension does not match table configuration.");
-            db_close(db);
-            return;
-        }
+    db = db_open(req->db_name);
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
-      free_search_request(req);
-      return;
+      goto search_cleanup;
+    }
+    if (db->dimension != req->dimension) {
+      send_error(server, INVALID_PARAMETER,
+                 "Vector dimension does not match table configuration.");
+      goto search_cleanup;
     }
 
-if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
-        send_error(server, INVALID_PARAMETER, "top_k must be between 1 and 10000.");
-        free_search_request(req);
-        db_close(db); 
-        return;
+    if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
+      send_error(server, INVALID_PARAMETER,
+                 "top_k must be between 1 and 10000.");
+      goto search_cleanup;
+    }
+    if (req->use_ann && (req->nprobe == 0 || req->nprobe > MAX_TOP_K)) {
+      send_error(server, INVALID_PARAMETER,
+                 "nprobe must be a positive integer.");
+      goto search_cleanup;
     }
 
-    SearchResult_t *results = (SearchResult_t *)malloc(req->top_k * sizeof(SearchResult_t));
+    results = (SearchResult_t *)malloc(req->top_k * sizeof(SearchResult_t));
     if (results == NULL) {
-        send_error(server, INTERNAL_ERROR, "Out of memory allocating search results.");
-        free_search_request(req);
-        db_close(db);
-        return;
+      send_error(server, INTERNAL_ERROR,
+                 "Out of memory allocating search results.");
+      goto search_cleanup;
     }
 
     if (req->use_ann) {
       uint64_t loaded_k;
-      cluster_t *clusters =
-          load_ivf_index(req->db_name, &loaded_k, req->dimension);
+      pthread_rwlock_rdlock(&index_lock);
+      cluster_t *clusters =load_ivf_index(req->db_name, &loaded_k, req->dimension);
+      pthread_rwlock_unlock(&index_lock);
 
       if (clusters == NULL) {
         send_error(server, INVALID_PARAMETER,
                    "Index not trained. Call /train or use ENN.");
-        free(results);
-        free_search_request(req);
-        return;
+        goto search_cleanup;
       }
 
       db_ann_search(db, req->query_vector, req->top_k, req->nprobe, clusters,
@@ -233,7 +292,7 @@ if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
                   req->top_k, db->calculate_distance, results);
     }
 
-    char *json_payload = serialize_search_results(results, req->top_k);
+    json_payload = serialize_search_results(results, req->top_k);
 
     if (json_payload != NULL) {
       char http_response[4096];
@@ -247,55 +306,57 @@ if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
                strlen(json_payload), json_payload);
 
       send(server->clientfd, http_response, strlen(http_response), 0);
-
-      free(json_payload);
     } else {
       send_error(server, INTERNAL_ERROR, "Failed to serialize search results.");
     }
 
-    free(results);
-    free_search_request(req);
-    db_close(db);
-    free(http_body);
-    close(server->clientfd);
+  search_cleanup:
+    if (json_payload)
+      free(json_payload);
+    if (results)
+      free(results);
+    if (db)
+      db_close(db);
+    if (req)
+      free_search_request(req);
+    if (http_body)
+      free(http_body);
 
+    close(server->clientfd);
   } else if (strstr(header_buffer, "POST /insert") != NULL) {
     // insert_data();
+    insert_req_t *req = NULL;
+    FlatDb_t *db = NULL;
 
-    
-
-    insert_req_t *req = parse_insert_request(http_body);
+    req = parse_insert_request(http_body);
     if (req == NULL) {
       send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
-      return;
+      goto insert_cleanup;
+    }
+    /*@Auth Guardrail
+     *
+     */
+    if (!authenticate_request(header_buffer, req->db_name)) {
+      send_error(server, UNAUTHORIZED_ACCESS,
+                 "Invalid or missing API key for this table.");
+      goto insert_cleanup;
     }
 
-
-    // Auth guardrail
-    if (!authenticate_request(header_buffer, req->db_name)) {
-            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
-            free_insert_request(req);
-            return;
-        }
-
-
- FlatDb_t *db = db_open(req->db_name);
-    if (db->dimension != req->dimension) {
-            send_error(server, INVALID_PARAMETER, "Vector dimension does not match table configuration.");
-            db_close(db);
-            return;
-        }
+    db = db_open(req->db_name);
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
-      free_insert_request(req);
-      return;
+      goto insert_cleanup;
+    }
+
+    if (db->dimension != req->dimension) {
+      send_error(server, INVALID_PARAMETER,
+                 "Vector dimension does not match table configuration.");
+      goto insert_cleanup;
     }
 
     if (db_insert(db, req->id, req->vector, req->metadata) < 0) {
       send_error(server, INTERNAL_ERROR, "Failed to write record to disk.");
-      free_insert_request(req);
-      db_close(db);
-      return;
+      goto insert_cleanup;
     }
 
     char response[1024];
@@ -313,52 +374,54 @@ if (req->top_k == 0 || req->top_k > MAX_TOP_K) {
 
     send(server->clientfd, response, strlen(response), 0);
 
-    free_insert_request(req);
-    db_close(db);
-    free(http_body);
+  insert_cleanup:
+    if (req)
+      free_insert_request(req);
+    if (db)
+      db_close(db);
+    if (http_body)
+      free(http_body);
     close(server->clientfd);
 
   } else if (strstr(header_buffer, "POST /train") != NULL) {
     // train_db();
+    train_req_t *req = NULL;
+    FlatDb_t *db = NULL;
+    cluster_t *trained_clusters = NULL;
 
-   
-
-    train_req_t *req = parse_train_request(http_body);
+    req = parse_train_request(http_body);
     if (req == NULL) {
       send_error(server, INVALID_PARAMETER, "Malformed JSON payload.");
-      return;
+      goto train_cleanup;
     }
-    
 
-    //Auth Guardrail
     if (!authenticate_request(header_buffer, req->db_name)) {
-            send_error(server, UNAUTHORIZED_ACCESS, "Invalid or missing API key for this table.");
-            free_train_request(req);
-            return;
-        }
+      send_error(server, UNAUTHORIZED_ACCESS,
+                 "Invalid or missing API key for this table.");
+      goto train_cleanup;
+    }
 
-
-FlatDb_t *db = db_open(req->db_name);
+    db = db_open(req->db_name);
     if (db == NULL) {
       send_error(server, WRONG_REQUEST, "Database table not found.");
-      free_train_request(req);
-      db_close(db);
-      return;
+      goto train_cleanup;
     }
 
-    if (db->count == 0 || db->count < req->k) {
+    if (req->k == 0 || db->count == 0 || db->count < req->k) {
       send_error(server, INVALID_PARAMETER,
                  "Not enough records to train the requested clusters.");
-      free_train_request(req);
-      return;
+      goto train_cleanup;
     }
 
-    cluster_t *trained_clusters =
+    trained_clusters =
         kmeans_build(db->records, db->count, req->k, db->dimension,
                      req->max_iterations, db->calculate_distance);
 
-    if (save_ivf_index(req->db_name, trained_clusters, req->k, db->dimension) <
-        0) {
+    pthread_rwlock_wrlock(&index_lock);
+    int save_status =
+        save_ivf_index(req->db_name, trained_clusters, req->k, db->dimension);
+    pthread_rwlock_unlock(&index_lock);
+    if (save_status < 0) {
       send_error(server, INTERNAL_ERROR,
                  "Failed to save trained index to disk.");
     } else {
@@ -378,17 +441,25 @@ FlatDb_t *db = db_open(req->db_name);
       send(server->clientfd, response, strlen(response), 0);
     }
 
-    for (uint64_t i = 0; i < req->k; i++) {
-      free(trained_clusters[i].centroid_vector);
-      free(trained_clusters[i].record_index);
-      free(trained_clusters[i].byte_offsets);
+  train_cleanup:
+    if (trained_clusters && req) {
+      for (uint64_t i = 0; i < req->k; i++) {
+        if (trained_clusters[i].centroid_vector)
+          free(trained_clusters[i].centroid_vector);
+        if (trained_clusters[i].record_index)
+          free(trained_clusters[i].record_index);
+        if (trained_clusters[i].byte_offsets)
+          free(trained_clusters[i].byte_offsets);
+      }
+      free(trained_clusters);
     }
-    free(trained_clusters);
-    free_train_request(req);
-    db_close(db);
-    free(http_body);
+    if (req)
+      free_train_request(req);
+    if (db)
+      db_close(db);
+    if (http_body)
+      free(http_body);
     close(server->clientfd);
-
   } else {
 
     send_error(server, WRONG_REQUEST, "Invalid API route.");

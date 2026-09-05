@@ -36,6 +36,8 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
       total_cluster[i].count = 0;
     }
     for (uint64_t i = 0; i < count; i++) {
+      if (record[i].is_deleted)
+        continue;
       float dis = 1e30;
       uint64_t best_cluster = 0;
       for (uint64_t j = 0; j < k; j++) {
@@ -90,6 +92,12 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
           diff = -diff;
         } // absolute value of diffrence
         if (diff > epsilon) {
+          if (ittrate >= max_iterations) {
+            free(diffrence);
+            free(old_centroids);
+            goto map_offsets;
+          }
+
           for (uint64_t c = 0; c < k; c++) {
             memcpy(&old_centroids[c * dimension],
                    total_cluster[c].centroid_vector, dimension * sizeof(float));
@@ -103,19 +111,22 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
     free(old_centroids);
     end = 0;
   }
-/*                        Map RAM indices to physical disk offsets                                                                               
- **/
-for (int i = 0; i < k; i++) {
-    total_cluster[i].byte_offsets = (uint64_t *)malloc(total_cluster[i].count * sizeof(uint64_t));
-    
+
+map_offsets:
+  /*                        Map RAM indices to physical disk offsets
+   **/
+  for (int i = 0; i < k; i++) {
+    total_cluster[i].byte_offsets =
+        (uint64_t *)malloc(total_cluster[i].count * sizeof(uint64_t));
+
     for (uint64_t j = 0; j < total_cluster[i].count; j++) {
-        uint64_t ram_idx = total_cluster[i].record_index[j];
-        
-        uint64_t physical_offset = record[ram_idx].byte_offset;
-        
-        total_cluster[i].byte_offsets[j] = physical_offset;
+      uint64_t ram_idx = total_cluster[i].record_index[j];
+
+      uint64_t physical_offset = record[ram_idx].byte_offset;
+
+      total_cluster[i].byte_offsets[j] = physical_offset;
     }
-}
+  }
   return total_cluster;
 }
 
@@ -172,6 +183,3 @@ ivf_fetched_t *ivf_search(cluster_t *cluster, float *query_vector,
   free(best_clusters);
   return ivf_fetched;
 }
-
-
-

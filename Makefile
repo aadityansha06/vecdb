@@ -25,7 +25,7 @@ MAIN_OBJS = $(MAIN_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.c)
 TEST_OBJS = $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-CFLAGS = -Wall -Wextra -I$(INC_DIR) -O3 -march=native -ffast-math -ftree-vectorize
+CFLAGS = -Wall -Wextra -I$(INC_DIR) -O3 -march=native -ffast-math -ftree-vectorize -lpthread
 LDFLAGS = -lm
 
 all: clean $(TARGET)

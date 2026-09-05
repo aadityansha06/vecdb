@@ -10,6 +10,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
+static pthread_mutex_t insert_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * @file db.c
  * @brief Interface to  handel Dd func including initialization,
@@ -24,12 +28,7 @@
  * Prevents clients from creating new tables.
  */
 
-
-
-
-
-
-
+static int storage_patch_flag(const char *file_name, long offset, bool value);
 
 /* @GUARDRAIL for Sanitizing input
  *
@@ -211,6 +210,8 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
   db->records[db->count].vector = vec_cpy;
   db->records[db->count].metadata = meta_cpy;
   db->records[db->count].is_deleted = false;
+    pthread_mutex_lock(&insert_lock);
+
   db->records[db->count].byte_offset = storage_current_offset(db->storage);
   /**
    * @brief Appends a single vector record to the binary storage file on disk.
@@ -225,6 +226,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
   int db_write =
       storage_write_record(db->storage, &db->records[db->count], db->dimension);
+  pthread_mutex_unlock(&insert_lock);
   if (db_write < 0) {
 
     perror("Fatal Error: Failed to write record\n");
@@ -337,7 +339,7 @@ void db_close(FlatDb_t *db) {
 
 int db_delete(FlatDb_t *db, uint64_t id) {
 
-    if (db == NULL || db->storage == NULL || db->storage->fp == NULL)
+  if (db == NULL || db->storage == NULL || db->storage->fp == NULL)
     return -1;
 
   for (uint64_t i = 0; i < db->count; i++) {
@@ -345,22 +347,33 @@ int db_delete(FlatDb_t *db, uint64_t id) {
 
       db->records[i].is_deleted = true;
 
-      long flag_offset = db->records[i].byte_offset + sizeof(uint32_t);
+      long flag_offset = db->records[i].byte_offset + sizeof(uint64_t);
 
       if (fseek(db->storage->fp, flag_offset, SEEK_SET) != 0) {
         perror("Failed to seek to delete flag on disk");
         return -1;
       }
 
-      bool deleted_flag = true;
-      if (fwrite(&deleted_flag, sizeof(bool), 1, db->storage->fp) != 1) {
-        perror("Failed to write delete flag to disk");
+      int patch_result =
+          storage_patch_flag(db->storage->file_name, flag_offset, true);
+      if (patch_result != 0) {
+        db->records[i].is_deleted = false;
         return -1;
       }
-
-      fflush(db->storage->fp);
       return 0;
     }
   }
   return -1;
+}
+static int storage_patch_flag(const char *file_name, long offset, bool value) {
+  FILE *fp = fopen(file_name, "r+b"); // NOT append mode
+  if (fp == NULL)
+    return -1;
+  if (fseek(fp, offset, SEEK_SET) != 0) {
+    fclose(fp);
+    return -1;
+  }
+  int ok = (fwrite(&value, sizeof(bool), 1, fp) == 1);
+  fclose(fp);
+  return ok ? 0 : -1;
 }

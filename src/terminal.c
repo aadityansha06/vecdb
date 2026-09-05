@@ -1,14 +1,14 @@
 #include "../include/terminal.h"
+#include "../include/api-key-generate.h"
 #include "../include/db.h"
+#include "../include/search/baseline-flat.h"
+#include "../include/server.h"
 #include <ctype.h>
 #include <inttypes.h>
 #include <stdint.h>
-#include <string.h>
-#include "../include/api-key-generate.h"
-#include "../include/search/baseline-flat.h"
-#include <unistd.h>
 #include <stdlib.h>
-#include "../include/server.h"
+#include <string.h>
+#include <unistd.h>
 
 /* Return codes for handle_command(): whether the REPL should keep going. */
 #define TUI_CONTINUE 1
@@ -23,9 +23,9 @@ static void print_help(void) {
   printf("      Create a brand new table.\n");
   printf("      metric: 0 = cosine, 1 = euclidean\n");
   printf("      example: origin init movies 128 1000 0\n\n");
-  printf("  origin open <name> <dimension> <metric>\n");
+  printf("  origin open <name>\n");
   printf("      Open a table that was already created with 'origin init'.\n");
-  printf("      example: origin open movies 128 0\n\n");
+  printf("      example: origin open movies\n\n");
   printf("  origin insert <id> [metadata]\n");
   printf("      Insert a vector into the currently open/initialized table.\n");
   printf("      <id> must be a non-negative integer. [metadata] is an\n");
@@ -64,8 +64,8 @@ static int count_words(const char *s) {
 static int read_vector(uint64_t dimension, float *out) {
   for (uint64_t i = 0; i < dimension; i++) {
     if (scanf("%f", &out[i]) != 1) {
-      printf("Error: expected a number for value %" PRIu64
-             " of %" PRIu64 ", got something else. Aborting this command.\n",
+      printf("Error: expected a number for value %" PRIu64 " of %" PRIu64
+             ", got something else. Aborting this command.\n",
              i + 1, dimension);
       int c;
       while ((c = getchar()) != '\n' && c != EOF)
@@ -81,7 +81,7 @@ static int read_vector(uint64_t dimension, float *out) {
 
 static int handle_command(char *command, FlatDb_t **master_db) {
   if (count_words(command) == 0) {
-    return TUI_CONTINUE; 
+    return TUI_CONTINUE;
   }
 
   char cmd[20] = {0}, arg[20] = {0}, db_name[200] = {0};
@@ -89,7 +89,7 @@ static int handle_command(char *command, FlatDb_t **master_db) {
   int metric_int = 0;
 
   int ret = sscanf(command, "%19s %19s %199s %" SCNu64 " %" SCNu64 " %d", cmd,
-                    arg, db_name, &dimension, &initial_capacity, &metric_int);
+                   arg, db_name, &dimension, &initial_capacity, &metric_int);
   int words = count_words(command);
 
   if (strcmp(cmd, "origin") != 0) {
@@ -186,10 +186,12 @@ static int handle_command(char *command, FlatDb_t **master_db) {
       generate_api_key(new_api_key);
       save_api_key(db_name, new_api_key);
 
-      printf("\n================================================================\n");
+      printf("\n==============================================================="
+             "=\n");
       printf("SUCCESS: Initialized DB '%s'\n", db_name);
       printf("Your API Key for '%s' is:\n%s\n", db_name, new_api_key);
-      printf("================================================================\n\n");
+      printf("================================================================"
+             "\n\n");
     } else {
       printf("Error: Failed to initialize table '%s'. Check permissions on "
              "./origin_data and try again.\n",
@@ -198,25 +200,14 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     return TUI_CONTINUE;
   }
 
-  /* --- open --- */
+  /* @Cmd-open */
   if (strcmp(arg, "open") == 0) {
-    if (words != 5) {
-      printf("Usage: origin open <name> <dimension> <metric>\n");
-      printf("  got %d argument(s), need exactly 3: name, dimension, "
-             "metric (0=cosine, 1=euclidean)\n",
-             words - 2);
-      printf("  example: origin open movies 128 0\n");
+    if (words != 3) {
+      printf("Usage: origin open <name>\n");
+      printf("  example: origin open movies\n");
       return TUI_CONTINUE;
     }
-    if (dimension == 0) {
-      printf("Error: dimension must be a positive integer.\n");
-      return TUI_CONTINUE;
-    }
-    if (metric_int != 0 && metric_int != 1) {
-      printf("Error: metric must be 0 (cosine) or 1 (euclidean), got %d.\n",
-             metric_int);
-      return TUI_CONTINUE;
-    }
+
     if (*master_db != NULL) {
       printf("Error: A database is already open in this session. Restart "
              "OriginDB to work with a different table.\n");
@@ -226,18 +217,21 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     *master_db = db_open(db_name);
 
     if (*master_db != NULL) {
-      printf("\n================================================================\n");
+      printf("\n==============================================================="
+             "=\n");
       printf("SUCCESS: Opened existing DB '%s' (Dim: %" PRIu64 ")\n", db_name,
-             dimension);
-      printf("================================================================\n\n");
+             (*master_db)->dimension);
+      printf("================================================================"
+             "\n\n");
     } else {
-      printf("Error: Table '%s' does not exist. Use 'origin init' first.\n",
+      printf("Error: Table '%s' does not exist or is corrupted. Use 'origin "
+             "init' first.\n",
              db_name);
     }
     return TUI_CONTINUE;
   }
 
-  /* --- insert --- */
+  /* @Cmd-insert */
   if (strcmp(arg, "insert") == 0) {
     if (*master_db == NULL) {
       printf("Error: No database open. Run 'origin init ...' or 'origin "
@@ -285,7 +279,7 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     return TUI_CONTINUE;
   }
 
-  /* --- search --- */
+  /* @Cmd-search */
   if (strcmp(arg, "search") == 0) {
     if (*master_db == NULL) {
       printf("Error: No database open. Run 'origin init ...' or 'origin "
@@ -344,35 +338,39 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     free(results);
     return TUI_CONTINUE;
   }
-  /* --- delete --- */
-  if (strcmp(arg, "delete") == 0) {
-    if (*master_db == NULL) {
-      printf("Error: No database open. Run 'origin init ...' or 'origin open ...' first.\n");
-      return TUI_CONTINUE;
-    }
-    
-    if (words != 3) {
-      printf("Usage: origin delete <id>\n");
-      printf("  example: origin delete 42\n");
-      return TUI_CONTINUE;
-    }
+  /*@Cmd-Delete */
+    if (strcmp(arg, "delete") == 0) {
+      if (*master_db == NULL) {
+        printf("Error: No database open. Run 'origin init ...' or 'origin open "
+               "...' first.\n");
+        return TUI_CONTINUE;
+      }
 
-    uint64_t id_to_delete; 
-    
-    if (sscanf(command, "%*s %*s  %" PRIu64"\n", &id_to_delete) < 1) {
-      printf("Error: <id> must be a valid positive integer.\n");
-      printf("Usage: origin delete <id>\n");
+      if (words != 3) {
+        printf("Usage: origin delete <id>\n");
+        printf("  example: origin delete 42\n");
+        return TUI_CONTINUE;
+      }
+
+      uint64_t id_to_delete;
+
+      if (sscanf(command, "%*s %*s %" SCNu64, &id_to_delete) < 1) {
+        printf("Error: <id> must be a valid positive integer.\n");
+        printf("Usage: origin delete <id>\n");
+        return TUI_CONTINUE;
+      }
+
+      if (db_delete(*master_db, id_to_delete) == 0) {
+        printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n",
+               id_to_delete);
+      } else {
+        printf("Error: Vector ID %" PRIu64
+               " not found, already deleted, or disk write failed.\n",
+               id_to_delete);
+      }
+
       return TUI_CONTINUE;
     }
-
-    if (db_delete(*master_db, id_to_delete) == 0) {
-      printf("SUCCESS: Vector ID  %" PRIu64"  has been permanently marked as deleted on disk.\n", id_to_delete);
-    } else {
-      printf("Error: Vector ID  %" PRIu64" not found or has already been deleted.\n", id_to_delete);
-    }
-    
-    return TUI_CONTINUE;
-  }
 
   printf("Unknown command 'origin %s'. Try 'origin --help' for the list of "
          "commands.\n",

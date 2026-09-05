@@ -17,6 +17,10 @@ allowing the engine to instantly jump around the disk using `fseek()`
 to fetch targeted vectors for similarity calculations
 without loading the entire dataset into memory.
 
+### Read Docs to get started
+
+-[Usage-API-Doc](write-up/usage_API_Docs.md)
+
 
 # Why this exists
 
@@ -42,9 +46,11 @@ I'll continue to work on it, implementing SIMD, CUDA, HNSW, and many more optimi
 ## Design Writeups
 
 - Storage Architecture Design for Targeted Disk Reads in ANN Vector Search in C
-  [Medium](https://medium.com/@vermaadityansh/storage-architecture-design-for-targeted-disk-reads-in-ann-vector-search-7159e5b46453) | [write-up](write-up/Storage-architecture.md)
+  [Medium](https://medium.com/@vermaadityansh/storage-architecture-design-for-targeted-disk-reads-in-ann-vector-search-7159e5b46453) | [github-read](write-up/Storage-architecture.md)
 - Per Table Key Authentication Design for a Multi Tenant Vector Database in C
-  [Medium](https://medium.com/@vermaadityansh/per-table-key-authentication-design-for-a-multi-tenant-vector-database-in-c-51f2b834df82) | [write-up](write-up/Auth-design.md)
+  [Medium](https://medium.com/@vermaadityansh/per-table-key-authentication-design-for-a-multi-tenant-vector-database-in-c-51f2b834df82) | [github-read](write-up/Auth-design.md)
 
+- Scaling VectorDb written in C to Handle Concurrent Requests
+[Medium](https://medium.com/@vermaadityansh/scaling-vectordb-written-in-c-to-handle-concurrent-requests-2fceb641e0c0?sharedUserId=vermaadityansh) | [github-read](write-up/originDb-concurrency.md)
 
 Feel free to contribute and connect at vermaadityansh@gmail.com or on X (https://x.com/aadityansha_06)

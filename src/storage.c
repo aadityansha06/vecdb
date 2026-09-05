@@ -11,7 +11,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-
 storage_t *storage_init(const char *table_name) {
   storage_t *storage = (storage_t *)malloc(sizeof(struct storage));
   if (storage == NULL)
@@ -34,8 +33,9 @@ storage_t *storage_init(const char *table_name) {
   }
   snprintf(db_path, sizeof(db_path), "%s/data.db", folder_path);
   FILE *touch = fopen(db_path, "a+b");
-    if (touch) fclose(touch);
-  storage->fp = fopen(db_path, "a+b");
+  if (touch)
+    fclose(touch);
+storage->fp = fopen(db_path, "r+b");
   if (storage->fp == NULL) {
     perror("Fatal Error: Failed to Open file \n");
     free(storage);
@@ -52,7 +52,7 @@ int storage_write_record(storage_t *storage, Record_t *record,
   if (storage == NULL || record == NULL || storage->fp == NULL) {
     return -1;
   }
-    fseek(storage->fp, 0, SEEK_END);
+  fseek(storage->fp, 0, SEEK_END);
   size_t written = fwrite(&record->id, sizeof(uint64_t), 1, storage->fp);
   if (written != 1)
     return -1;
@@ -235,7 +235,7 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     return NULL;
   }
 
-  cluster_t *cluster = (cluster_t *)malloc(sizeof(cluster_t) * (*out_k));
+cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
   if (cluster == NULL) {
     fclose(fp);
     return NULL;
@@ -245,18 +245,38 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     cluster[i].centroid_vector = (float *)malloc(sizeof(float) * dimension);
     read = fread(cluster[i].centroid_vector, sizeof(float), dimension, fp);
     if (read != dimension) {
+      for (uint64_t j = 0; j <= i; j++) {
+        if (cluster[j].centroid_vector)
+          free(cluster[j].centroid_vector);
+        if (cluster[j].byte_offsets)
+          free(cluster[j].byte_offsets);
+      }
+      free(cluster);
       fclose(fp);
       return NULL;
     }
 
     read = fread(&cluster[i].count, sizeof(uint64_t), 1, fp);
     if (read != 1) {
+      for (uint64_t j = 0; j <= i; j++) {
+        if (cluster[j].centroid_vector)
+          free(cluster[j].centroid_vector);
+        if (cluster[j].byte_offsets)
+          free(cluster[j].byte_offsets);
+      }
+      free(cluster);
       fclose(fp);
       return NULL;
     }
-
     read = fread(&cluster[i].capacity, sizeof(uint64_t), 1, fp);
     if (read != 1) {
+      for (uint64_t j = 0; j <= i; j++) {
+        if (cluster[j].centroid_vector)
+          free(cluster[j].centroid_vector);
+        if (cluster[j].byte_offsets)
+          free(cluster[j].byte_offsets);
+      }
+      free(cluster);
       fclose(fp);
       return NULL;
     }
@@ -266,6 +286,13 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
       read = fread(cluster[i].byte_offsets, sizeof(uint64_t), cluster[i].count,
                    fp);
       if (read != cluster[i].count) {
+        for (uint64_t j = 0; j <= i; j++) {
+          if (cluster[j].centroid_vector)
+            free(cluster[j].centroid_vector);
+          if (cluster[j].byte_offsets)
+            free(cluster[j].byte_offsets);
+        }
+        free(cluster);
         fclose(fp);
         return NULL;
       }

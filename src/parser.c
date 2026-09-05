@@ -20,7 +20,6 @@ search_req_t *parse_search_request(const char *json_body) {
   search_req_t *req = calloc(1, sizeof(search_req_t));
   strncpy(req->db_name, db_name->valuestring, sizeof(req->db_name) - 1);
   req->db_name[sizeof(req->db_name) - 1] = '\0';
-  strncpy(req->db_name, db_name->valuestring, sizeof(req->db_name) - 1);
   req->top_k = top_k->valueint;
   req->use_ann = cJSON_IsTrue(use_ann);
   req->dimension = cJSON_GetArraySize(vec_array);
