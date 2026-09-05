@@ -1,127 +1,209 @@
-# Deferred Delete Architecture in OriginDB
+# OriginDB — Deferred Delete Architecture
 
-**In one sentence:** an API key, however completely compromised, can queue a
-deletion request but can never cause a real deletion to happen on its own. Only a
-human, confirming locally on the machine, can turn a request into an actual change
-on disk.
+## 1. The problem this solves
 
-## The starting point
+In most vector databases (Qdrant, Milvus, pgvector, Pinecone, etc.), delete is just
+another authenticated API call. Whoever holds a valid API key can delete data over
+the network, the same way they can insert it. That means a single leaked or stolen
+key is enough to destroy data, not just pollute it.
 
-Most vector databases treat deletion as an ordinary authenticated API call.
-Whatever holds a valid key can insert data, and the same key can typically delete
-it. This is true of the large managed platforms as much as it is of self hosted
-engines built on top of Postgres or SQLite. The credential is trusted completely.
-If it leaks, gets stolen, or ends up in a compromised client, whoever holds it can
-remove data from the system directly, immediately, over the network.
+OriginDB closes this door at the widest level. There is no route anywhere in the
+server that directly performs a deletion. Deletion only ever happens through the
+local admin CLI, which requires being physically on the machine.
 
-Traditional relational databases handle this risk the same way they have for
-decades. A leaked credential with delete or drop privileges executes exactly what
-it asks for. The safety net sits after the fact, in the form of write ahead logs
-and point in time recovery, which let an operator roll a database back to a moment
-before the damage occurred. This is a mature and well tested strategy, but it is
-fundamentally a strategy of detection and reversal rather than prevention. The
-database itself does not refuse the command. It assumes the credential presented
-to it is legitimate, because that is the only signal it has to go on.
+The earlier version of this design (immediate-only, `origin delete <id>`, no
+network path at all) had real operational friction: every delete meant briefly
+stopping the live server. This design keeps the same core guarantee, the network
+can never delete data, while removing that friction, by splitting delete into two
+separate steps that live in two separate, non-overlapping code paths.
 
-OriginDB starts from a different premise for this one operation specifically.
-Rather than asking whether a credential is trustworthy enough to be allowed to
-delete, the design removes the network's ability to execute a deletion in the
-first place, for any credential, trusted or not.
+## 2. The core idea: request and execution are different code paths
 
-## The split between requesting and executing
+| | Can be triggered by | What it does |
+|---|---|---|
+| **Request** | Backend, over the network, authenticated with the table's normal API key | Appends one entry to a table's pending-deletes file. **Never opens `data.db` for writing. Never calls `db_delete`.** |
+| **Execution** | A human, locally, via SSH/terminal | Reads the pending-deletes file, shows a count, asks for confirmation, then calls `db_delete` for each entry and clears the file. **This is the only code path that ever writes a deletion into `data.db`.** |
 
-The mechanism is a separation between two actions that most systems treat as one.
+The security property this gives you: **even a fully compromised API key can never
+delete a single byte of real data on its own.** The worst it can do is write junk
+entries into a queue that a human reviews and approves before anything executes.
+This is a stronger guarantee than "permission-gated," because there's no
+misconfiguration or bypass that turns it back into direct network delete — the
+code path for "network request → data gone" simply doesn't exist.
 
-**Requesting a deletion**, over the network, with a valid table scoped API key,
-does not delete anything. It writes a small entry into a per table file, noting
-the record id and the time the request arrived. Nothing about handling this
-request opens the table's actual data file for writing. The code path that would
-perform a real deletion is never reached from the network at all.
+## 3. How the pending queue is stored on disk
 
-**Executing the queue**, reachable only from the local terminal on the machine
-itself, reads that file of pending requests. Before doing anything with them, it
-prints the count of records queued for deletion and waits for a human to confirm.
-Only after that confirmation does it call the function that actually flips a
-record's status on disk. Afterward the queue is cleared, ready to collect the next
-batch of requests.
+The queue is a small, separate binary file per table, `pending.bin`, completely
+distinct from the table's main data file. It has its own fixed layout:
 
-The result is that a compromised API key, however completely compromised, can
-never cause a single byte of real data to disappear on its own. The most damage it
-can do is write entries into a queue that a person must knowingly approve. There
-is no configuration flag standing between the network and this guarantee, because
-there is no code connecting them to disable.
+```
+[ id: 8 bytes ][ timestamp: 8 bytes ]  <- one entry, 16 bytes total
+[ id: 8 bytes ][ timestamp: 8 bytes ]  <- next entry
+...
+```
 
-## What happens to a record between request and execution
+- **Writing a request** appends exactly one 16-byte entry to the end of the file.
+  The first 8 bytes are the record's id, the next 8 bytes are the Unix timestamp
+  of when the request arrived. No header, no length prefix, nothing else.
 
-A record that has been requested for deletion but not yet processed sits in a
-middle state. Its bytes remain untouched on disk, and the underlying deleted flag
-has not been flipped. It has, however, already stopped appearing in search
-results. When a table is opened, the list of pending ids for that table is loaded
-into memory, and every search path checks a candidate record's id against that
-list before it is returned. This means a record effectively disappears from the
-application's point of view the moment a delete is requested, long before an
-administrator ever reviews and approves the batch. The gap between requesting a
-deletion and it becoming permanent is invisible to whoever is using the system day
-to day. It only matters to the person running the periodic cleanup.
+  ```
+  function requestDelete(tableName, recordId):
+      openFileForAppend(tableName + "/pending.bin")
+      writeBytes(recordId, 8 bytes)
+      writeBytes(currentUnixTimestamp(), 8 bytes)
+      closeFile()
+  ```
 
-## Why a delete request can only ever name one record
+- **Counting pending requests** needs no parsing at all, since every entry is the
+  same fixed size, the count is just `file size ÷ 16`.
 
-The request itself is deliberately narrow. It accepts a single table name and a
-single record id, nothing else. There is no way to phrase a request that asks for
-every record in a table, or for a range of ids, or for anything matching a
-pattern. This is not a rule enforced by checking the request afterward and
-rejecting broad ones. The shape of the request simply cannot express anything
-broader than one record, so there is nothing to check for and nothing to bypass.
+  ```
+  function countPending(tableName):
+      size = fileSizeInBytes(tableName + "/pending.bin")
+      return size / 16
+  ```
 
-## Why the system never checks whether an id exists at request time
+- **Loading the queue** reads that many 16-byte entries in sequence, keeping only
+  the id from each one. The timestamp isn't needed for the search-time check,
+  only for the admin's own reference later.
 
-An earlier version of this design considered checking, at the moment a delete
-request arrives, whether the record actually exists, and replying differently
-depending on the answer. This turns out to create a subtle problem worth
-explaining in some detail, because it is easy to build by accident and easy to
-miss.
+  ```
+  function loadPendingIds(tableName):
+      ids = []
+      for each 16-byte chunk in file(tableName + "/pending.bin"):
+          id = readBytes(chunk, first 8 bytes)
+          ids.append(id)
+      return ids
+  ```
 
-Suppose the check happened. A request naming a real record would take a certain
-amount of time to process, since confirming the record exists means looking it
-up. A request naming a typo, one that does not correspond to any real record,
-would skip that lookup and finish faster. Even if both requests are given the
-exact same reply, word for word, the amount of time each one took to answer would
-differ, if only by a small amount. An attacker holding a leaked key does not need
-the reply to say anything different. They only need to measure how long each
-reply took to arrive. Sending many guesses at ids and timing each response lets
-them work out, purely from the clock, which ids are real and which are not, even
-though every reply they received looked identical on the page. This is generally
-called a timing side channel, and it is a well known way that supposedly
-identical responses can still leak information through a channel nobody thought
-to hide.
+- **Sorting after load** turns the id list into something that can be checked
+  quickly during a search, by binary search instead of a linear scan through
+  every pending id one at a time. This is loaded once per table when it's opened,
+  and reused for every search against that table.
 
-OriginDB avoids this not by adding a special defense against timing measurement,
-but by removing the reason for one to exist. The decision to never check whether
-an id exists at request time means a real id and a typo do exactly the same
-amount of work, which is to say, they both do the single, fixed task of writing
-one line to a file. There is no extra lookup happening for real ids that a typo
-skips, so there is nothing for a timing measurement to detect a difference in.
-The side channel closes as a consequence of a decision made for an entirely
-different reason, rather than needing its own fix bolted on afterward.
+  ```
+  function isPendingDelete(recordId, sortedPendingIds):
+      return binarySearch(sortedPendingIds, recordId) != notFound
+  ```
 
-Existence is only ever resolved later, locally, when an administrator runs the
-processing step and the queue is already being reviewed by a person. A request
-naming a real id proceeds to an actual deletion. A request naming a typo quietly
-does nothing when its turn comes up. Neither outcome is visible to whoever sent
-the original request, because by the time it is decided, that request has long
-since returned its one, identical reply.
+- **Clearing the queue** happens only after every pending id has actually been
+  processed by an administrator, and simply means discarding the file's contents
+  and starting fresh.
 
-## What this guarantees, and what it does not
+The timestamp is not part of the security design. It exists purely so an
+administrator processing a backlog can see how old each request is, which is
+ordinary operational context, not something that changes what the queue can or
+can't be used for.
 
-The guarantee this architecture provides is narrow and specific. An API key, no
-matter how it was compromised, cannot cause a real deletion to happen on its own.
-The most it can do is add entries to a list that a person must actively choose to
-act on. That is the whole claim.
+## 4. Query-time filtering (soft, immediate exclusion)
 
-It is worth being equally clear about what this is not. It is not a general
-security hardening of the system, and it does not make OriginDB more secure than
-mature, extensively audited databases across the board. Those systems have
-decades of production hardening behind them that this project does not. What is
-different here is one specific decision about one specific operation, made
-deliberately, and carried through consistently enough that there is no path
-around it.
+Once an id is in `pending.bin`, it disappears from search results immediately,
+before a human has ever run the execution step. This is a usability property (a
+deleted-in-spirit record shouldn't keep showing up in results for hours until
+someone processes the queue) as much as a security one.
+
+- On opening a table, the pending-delete ids for that table are loaded into an
+  in-memory sorted array.
+- Both search paths (exact and ANN) extend the existing "skip if deleted" check
+  to also skip anything found in that array. Both already have the candidate's
+  id in hand at the point of comparison, so no extra bookkeeping is needed in the
+  pending-delete file beyond the id itself.
+
+This means a record can be in one of three states: **live**, **pending delete**
+(excluded from search, bytes untouched, flag not yet flipped), or **deleted**
+(tombstoned on disk). Only a human executing the queue moves a record from the
+middle state to the last one.
+
+## 5. `POST /delete-request` (network route)
+
+- Authenticated the same way as `/insert`, `/search`, `/train`, table-scoped API
+  key required.
+- Request body: `{ "db_name": "movies", "id": 42 }`, a single concrete id only.
+  No wildcards, no arrays, no "delete all", the schema itself makes a mass-delete
+  request structurally impossible to express, not just disallowed by convention.
+- Does not check whether the id exists. See §7 below, this is deliberate, not an
+  oversight.
+- Guarded by a dedicated lock so two concurrent requests don't race on the
+  append.
+- Response is identical regardless of whether the id turns out to be real, see §7.
+
+## 6. `origin process-deletes <table>` (admin CLI command)
+
+- Terminal-only, same trust boundary as `origin init` / `origin delete`.
+- Reads `pending.bin` for the table.
+- Shows a count and asks for confirmation before doing anything:
+  ```
+  14 records marked for deletion. Proceed? (y/n)
+  ```
+  This is the single most important control in the whole design, the point where
+  a human notices "wait, that's a lot more than I expected" before any damage
+  happens. It turns a compromised key spamming fake delete requests into
+  something a person catches by eye, rather than something that silently
+  executes.
+- On confirmation, calls `db_delete(id)` for each pending id. Ids that don't
+  correspond to a real record are looked up here for the first time, and simply
+  no-op (this is where existence gets resolved, not at request time). Ids already
+  deleted in a previous run also just no-op.
+- Clears `pending.bin` afterward.
+
+## 7. Why existence is never checked at request time (the oracle problem)
+
+An early version of this design considered having `/delete-request` check
+whether an id exists and respond differently depending on the answer. That would
+be a mistake, and it's worth explaining why, since it's a subtle but well-known
+category of vulnerability, an **oracle**: a system that answers a yes/no question
+for an attacker, even if it doesn't take direct action based on the answer.
+
+Say the check happened. A request naming a real record would take slightly
+longer to process, since confirming existence means looking the record up. A
+request naming a typo would skip that lookup and finish a hair faster. Even if
+both requests get the exact same reply, word for word, the time each one took to
+answer would differ. An attacker holding a leaked key doesn't need the reply to
+say anything different, they only need to measure how long each reply took.
+Sending many guesses and timing each response lets them work out, purely from the
+clock, which ids are real, even though every reply looked identical on the page.
+This is generally called a timing side channel.
+
+If `/delete-request` for a real id and a typo'd id ever produce any
+distinguishable signal, different response text, different status code,
+different response size, or a measurable timing difference, an attacker can
+enumerate every real id in a table by sending guesses and watching which ones get
+a different answer. That's real information leakage even though no data was ever
+deleted directly.
+
+The fix, and the one this design commits to:
+
+- **The endpoint never checks existence.** It accepts any well-formed id
+  unconditionally, queues it, and returns the same response either way. A real id
+  and a typo do exactly the same amount of work, appending one entry to a file,
+  so there is nothing for a timing measurement to detect a difference in. The
+  side channel closes as a side effect of this decision rather than needing a
+  fix of its own.
+- **Existence is only ever resolved later, locally, by a human**, during
+  `process-deletes`, when the count is already being reviewed anyway. A typo'd id
+  just quietly does nothing when its turn comes up, nothing about that moment is
+  visible to whoever originally sent the request.
+
+Practical guardrails worth keeping in mind so this property doesn't get
+accidentally reintroduced later:
+
+- If rate limiting or abuse detection is ever added to this endpoint, "suspicious"
+  must never be defined in terms of how many ids didn't exist, that reintroduces
+  the same oracle through the back door.
+- Keep the HTTP response (status, body, `Content-Length`) byte-identical for a
+  real id versus a nonexistent one, even a differing response size is technically
+  a distinguishable signal to a sufficiently determined attacker.
+- Anything from `process-deletes` (the count, which ids were real) must stay
+  local/terminal-side only, never echoed to a network-reachable log or dashboard,
+  or the same distinction leaks back out through a different door.
+
+## 8. What this design does and doesn't claim
+
+**Does claim:** an API key, however compromised, can never cause a single byte of
+real data to be deleted on its own. The most it can do is queue a request that a
+human must knowingly approve before anything happens.
+
+**Does not claim:** this makes OriginDB more secure than mature engines in
+general, or that it's a complete access-control system. It's a narrow, specific
+guarantee about one operation, deletion, achieved by removing the network's
+ability to directly execute it, not a general security hardening claim.
