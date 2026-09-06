@@ -1,18 +1,15 @@
 /*
-* Copyright (c) 2026 Aadityansha Verma. All rights reserved.
-* This file is licensed under the Business Source License 1.1.
-* See the LICENSE file in the project root for full terms.
-*/
-
-
-
-
-
+ * Copyright (c) 2026 Aadityansha Verma. All rights reserved.
+ * This file is licensed under the Business Source License 1.1.
+ * See the LICENSE file in the project root for full terms.
+ */
 
 #include "../include/db.h"
-#include "../include/storage.h"
 #include "../include/pending-delete.h"
+#include "../include/storage.h"
 #include <ctype.h>
+#include <float.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -20,8 +17,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <float.h>
-#include <pthread.h>
 
 static pthread_mutex_t insert_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -166,7 +161,7 @@ FlatDb_t *db_init(const char *db_name, uint64_t dimension,
 
   db->calculate_distance =
       get_distance(metric); // Returning the pointer of static function
-db->pending_deletes = load_pending_deletes(db_name, &db->pending_count);
+  db->pending_deletes = load_pending_deletes(db_name, &db->pending_count);
 
   return db;
 }
@@ -184,7 +179,7 @@ db->pending_deletes = load_pending_deletes(db_name, &db->pending_count);
 
 int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
-pthread_mutex_lock(&insert_lock);
+  pthread_mutex_lock(&insert_lock);
 
   if (db->count == db->capacity) {
     // Handel Out of memory failure
@@ -253,7 +248,7 @@ pthread_mutex_lock(&insert_lock);
   }
 
   db->count++;
-pthread_mutex_unlock(&insert_lock);
+  pthread_mutex_unlock(&insert_lock);
   return 0;
 }
 
@@ -261,12 +256,11 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
                   uint64_t nprobe, cluster_t *clusters, uint64_t num_clusters,
                   SearchResult_t *out_results) {
 
-    for (uint64_t j = 0; j < top_k; j++) {
+  for (uint64_t j = 0; j < top_k; j++) {
     out_results[j].calculated_distance = FLT_MAX;
-    out_results[j].metadata = NULL; 
+    out_results[j].metadata = NULL;
     out_results[j].id = 0;
   }
- 
 
   ivf_fetched_t *fetched =
       ivf_search(clusters, query_vector, nprobe, num_clusters, db->dimension,
@@ -282,7 +276,9 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
     if (storage_fetch_by_offset(db->storage, byte_offset, &temp_record,
                                 db->dimension) == 1) {
 
-     if (temp_record.is_deleted || is_pending_delete(temp_record.id, db->pending_deletes, db->pending_count)) {
+      if (temp_record.is_deleted ||
+          is_pending_delete(temp_record.id, db->pending_deletes,
+                            db->pending_count)) {
         free(temp_record.vector);
         if (temp_record.metadata)
           free(temp_record.metadata);
@@ -294,17 +290,16 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
 
       if (dis < out_results[top_k - 1].calculated_distance) {
 
-       int insert_idx = top_k - 1;
+        int insert_idx = top_k - 1;
         while (insert_idx > 0 &&
                dis < out_results[insert_idx - 1].calculated_distance) {
           insert_idx--;
         }
 
-        if (out_results[top_k - 1].metadata != NULL) {
-            free(out_results[top_k - 1].metadata);
-        }
-
         for (int j = top_k - 1; j > insert_idx; j--) {
+          if (out_results[j].metadata != NULL) {
+            free(out_results[j].metadata);
+          }
           out_results[j] = out_results[j - 1];
         }
         out_results[insert_idx].id = temp_record.id;
@@ -352,7 +347,7 @@ void db_close(FlatDb_t *db) {
   }
 
   if (db->pending_deletes != NULL) {
-      free(db->pending_deletes);
+    free(db->pending_deletes);
   }
 
   free(db);

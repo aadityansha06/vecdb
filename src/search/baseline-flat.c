@@ -11,7 +11,8 @@ int flat_search(Record_t *records, uint64_t count, uint64_t dimension,
                 Distance_func calculate_distance, SearchResult_t *out_results,
                 uint64_t *pending_deletes, uint64_t pending_count) {
 
-    if (top_k == 0) return -1;
+  if (top_k == 0)
+    return -1;
   for (uint64_t j = 0; j < top_k; j++) {
     out_results[j].calculated_distance = FLT_MAX;
     out_results[j].metadata = NULL;
@@ -34,11 +35,10 @@ int flat_search(Record_t *records, uint64_t count, uint64_t dimension,
         insert_idx--;
       }
 
-      if (out_results[top_k - 1].metadata != NULL) {
-        free(out_results[top_k - 1].metadata);
-      }
-
       for (int j = top_k - 1; j > insert_idx; j--) {
+        if (out_results[j].metadata != NULL) {
+          free(out_results[j].metadata);
+        }
         out_results[j] = out_results[j - 1];
       }
 
