@@ -10,7 +10,7 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
                         uint64_t dimension, uint64_t max_iterations,
                         Distance_func cal_distance) {
 
-  cluster_t *total_cluster = (cluster_t *)malloc(k * sizeof(cluster_t));
+ cluster_t *total_cluster = (cluster_t *)calloc(k, sizeof(cluster_t));
   float *old_centroids = (float *)malloc(k * dimension * sizeof(float));
 
   for (uint64_t i = 0; i < k; i++) {
@@ -18,9 +18,11 @@ cluster_t *kmeans_build(Record_t *record, uint64_t count, uint64_t k,
     total_cluster[i].centroid_vector =
         (float *)malloc(dimension * sizeof(float));
     memcpy(total_cluster[i].centroid_vector, record[random_idx].vector,
-           dimension * sizeof(float));
+           dimension * sizeof(float)); 
     total_cluster[i].record_index =
         (uint64_t *)malloc(count * sizeof(uint64_t));
+    total_cluster[i].capacity = count;
+
     memcpy(&old_centroids[i * dimension], total_cluster[i].centroid_vector,
            dimension * sizeof(float));
   }

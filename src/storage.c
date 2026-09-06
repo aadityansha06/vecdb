@@ -288,7 +288,7 @@ cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
       fclose(fp);
       return NULL;
     }
-    cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].capacity);
+cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].count);
 
     if (cluster[i].count > 0) {
       read = fread(cluster[i].byte_offsets, sizeof(uint64_t), cluster[i].count,
