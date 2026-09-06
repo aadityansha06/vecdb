@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include <float.h>
 #include <pthread.h>
 
 static pthread_mutex_t insert_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -257,11 +257,12 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
                   uint64_t nprobe, cluster_t *clusters, uint64_t num_clusters,
                   SearchResult_t *out_results) {
 
-  for (uint64_t i = 0; i < top_k; i++) {
-    out_results[i].calculated_distance = 1e30; // Using 1e30 as a safe infinity
-    out_results[i].id = 0;
-    out_results[i].metadata = NULL;
+    for (uint64_t j = 0; j < top_k; j++) {
+    out_results[j].calculated_distance = FLT_MAX;
+    out_results[j].metadata = NULL; 
+    out_results[j].id = 0;
   }
+ 
 
   ivf_fetched_t *fetched =
       ivf_search(clusters, query_vector, nprobe, num_clusters, db->dimension,
