@@ -510,7 +510,7 @@ static void handel_client(server_data_t *server) {
       goto insert_cleanup;
     }
 
-    float *vec_cpy =(float *) malloc(db->dimension * sizeof(float));
+    float *vec_cpy = (float *)malloc(db->dimension * sizeof(float));
     memcpy(vec_cpy, req->vector, db->dimension * sizeof(float));
     char *meta_cpy = req->metadata ? strdup(req->metadata) : NULL;
 
@@ -563,6 +563,8 @@ static void handel_client(server_data_t *server) {
     send(server->clientfd, response, strlen(response), 0);
 
   insert_cleanup:
+    if (table)
+      pthread_rwlock_unlock(&table->lock);
     if (req)
       free_insert_request(req);
 
