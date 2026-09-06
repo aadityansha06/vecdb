@@ -16,7 +16,10 @@ out locally, by a human, on the server itself. Read the full design here:
 
 ### Read Docs to get started
 
--[Usage-API-Doc](write-up/usage_API_Docs.md)
+- [Usage-API-Doc](write-up/usage_API_Docs.md) — how to call the API once it's running.
+- [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md) — how to build and
+  run it, plus real load-test numbers (verified clean up to ~950 concurrent
+  connections).
 
 
 # Why this exists
@@ -34,14 +37,16 @@ be appreciated too.
 
 
 ## Current Features
-- **Variable-Length Storage Engine:** Zero-padding disk persistence.
+- **Variable-Length Storage Engine:** Zero-padding disk persistence, backed by a
+  memory-mapped data file for concurrent, thread-safe reads.
 - **K-Means IVF Indexing:** Mathematical centroid clustering for fast approximate search.
 - **Bounded Insertion Sort:** Memory-safe Exact Nearest Neighbor (ENN) tracking.
-- **Byte-Offset Random Access:** fseek-based direct record retrieval from disk, no full-table scan needed for a known offset.
+- **Byte-Offset Random Access:** `pread`-based direct record retrieval from disk, no full-table scan needed for a known offset, and safe under concurrent reads.
 - **Persistent IVF Index:** trained clusters are serialized to disk and reloaded, so the index survives a restart without retraining.
 - **Pluggable Distance Metrics:** cosine and euclidean, selected per table via a function pointer router.
+- **Cached, Shared Tables:** each table is opened once and kept in memory across requests, rather than reloaded from disk per call, with inserts and pending deletes synced into the live table on a short background cycle.
 - **Auto-Growing Record Table:** in-memory record array doubles capacity on overflow instead of a fixed cap.
-- **TCP Server with JSON API:** POST /search, /insert, /train, /delete-request routes over raw sockets, parsed with cJSON.
+- **TCP Server with JSON API:** POST /search, /insert, /train, /delete-request routes over raw sockets, parsed with cJSON, backed by a 128-thread worker pool. Load-tested clean up to ~950 concurrent connections — see [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md).
 - **API Key Auth:** per-table key generation and verification on server requests.
 - **Deferred Delete Queue:** deletions can be requested over the network but can only ever be executed locally, with an explicit human confirmation — a leaked API key can never delete data on its own.
 - **Interactive TUI + One-Shot CLI:** REPL for exploring a table, or run a single command directly from the shell.
@@ -58,5 +63,8 @@ be appreciated too.
 
 - Deferred Delete Architecture: Why a Leaked API Key Can Never Delete Your Data
   [github-read](write-up/Delete-architecture.md)
+
+- Deployment & Capacity: build/run instructions and real load-test results
+  [github-read](write-up/Deployment-and-Capacity.md)
 
 Feel free to contribute and connect at vermaadityansh@gmail.com or on X (https://x.com/aadityansha_06)

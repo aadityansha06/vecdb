@@ -6,7 +6,9 @@ Operations** (reading and writing vectors, done over the network).
 
 > **Status:** Early/WIP. This document describes what the code actually does today,
 > including its current rough edges — see [Known Limitations](#5-known-limitations--read-before-going-live)
-> before pointing production traffic at it.
+> before pointing production traffic at it. For build/run instructions and real
+> load-test capacity numbers, see
+> [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md).
 
 ## 1. Admin CLI (local only — never exposed over the network)
 
@@ -85,6 +87,13 @@ get a `400` with a clear message, rather than a corrupted table.
 ```
 `vector` must have exactly the table's configured dimension. `metadata` is optional.
 
+The record is written and `fsync`'d to disk before this call returns `200` — that
+part is immediate and durable. **It may take up to ~2 seconds to appear in
+`/search` results**, since the in-memory table used by search is refreshed on a
+short background cycle rather than on every single insert. See
+[`Deployment-and-Capacity.md`](Deployment-and-Capacity.md#3-architecture-at-a-glance-whats-actually-running-under-load)
+for why this trade-off exists.
+
 ### `POST /search`
 ```json
 {
@@ -113,10 +122,9 @@ get a `400` with a clear message, rather than a corrupted table.
 - Builds K-means clusters over the table's *non-deleted* records and persists the
   index to disk, so `use_ann: true` searches survive a server restart without
   retraining.
-- Note: `max_iterations` is currently a soft cap in the underlying clustering loop
-  — pathological input that never converges could in principle run past it. In
-  practice this is rare, but if you're training on adversarial or untrusted data,
-  keep an eye on it.
+- `max_iterations` is a hard cap on the clustering loop — training stops and
+  returns whatever clusters it has once that many iterations pass, even on data
+  that hasn't fully converged. Safe to point at untrusted or adversarial data.
 
 ### `POST /delete-request`
 ```json
@@ -141,10 +149,9 @@ A few things worth knowing about this route specifically:
   just by watching how the server responds (or how long it takes to respond),
   without ever seeing the data itself. Existence is only resolved later, locally,
   when an administrator processes the queue.
-- Queued requests take effect on search results immediately, well before anyone
-  runs `process-deletes`. A record with a pending delete request stops showing up
-  in `/search` right away, even though its bytes and on-disk flag haven't changed
-  yet.
+- Queued requests take effect on search results within the same short background
+  refresh window described above (up to ~2 seconds), well before anyone runs
+  `process-deletes`.
 
 ### Client examples
 
@@ -209,19 +216,24 @@ export async function searchMovies(queryVector: number[]) {
   you deploy *to* Vercel; rather, your Vercel (or any other) backend calls out to
   wherever *you've* deployed OriginDB (a VPS, a home server, etc.), the same way it
   might call out to any other API.
-- **The server runs a fixed pool of 32 worker threads** pulling connections off a
-  bounded queue (256 slots). Concurrent requests from your website are genuinely
+- **The server runs a fixed pool of 128 worker threads** pulling connections off a
+  bounded queue (512 slots). Concurrent requests from your website are genuinely
   handled in parallel, up to the pool size, rather than queued one-at-a-time.
-  If the queue fills (a burst past 256 pending connections), new connections are
+  If the queue fills (a burst past 512 pending connections), new connections are
   closed immediately rather than piling up unboundedly — your client should treat
-  a dropped connection as "retry shortly," not a hard failure.
-- **Concurrency correctness:** every request opens its own private handle onto a
-  table (no shared in-memory state between requests), so the only genuinely shared
-  resources are the on-disk files. Those are protected explicitly: a mutex guards
-  each record write to a table's `data.db`, and a read/write lock guards the IVF
-  index file (`/train` takes the write side, ANN `/search` takes the read side).
-  Concurrent `/insert`, `/search`, and `/train` calls — including against the same
-  table — are safe to fire in parallel.
+  a dropped connection as "retry shortly," not a hard failure. See
+  [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md) for real load-test
+  numbers on what this looks like in practice, including where this boundary
+  actually sits.
+- **Concurrency correctness:** each table is opened once and kept in memory,
+  shared across every request against it, rather than reloaded from disk per
+  request — reads use `pread()` against a memory-mapped copy of the data file, so
+  concurrent searches can't race on a shared file position. A per-table
+  read/write lock guards in-memory mutations (insert merges), a separate lock
+  guards the durable on-disk write, and a read/write lock guards the IVF index
+  file (`/train` takes the write side, ANN `/search` takes the read side).
+  Concurrent `/insert`, `/search`, and `/train` calls — including against the
+  same table — are safe to fire in parallel.
 - Keep `ORIGINDB_URL` and per-table API keys in your backend's environment/secrets,
   never in client-side code — the API key is the only thing standing between a
   caller and your table's data.
@@ -231,26 +243,25 @@ export async function searchMovies(queryVector: number[]) {
 - **No route performs an actual deletion, by design.** `/delete-request` only
   queues a request; only `origin process-deletes` (local, confirmed by a human)
   ever writes a real deletion to disk. Plan your cleanup workflow around running
-  that command periodically rather than expecting deletes to take effect the
-  moment a request is sent — see [`Delete-architecture.md`](Delete-architecture.md).
+  that command periodically rather than expecting a *permanent, on-disk* deletion
+  to happen automatically — see [`Delete-architecture.md`](Delete-architecture.md).
 - **Deletes are tombstones, not physical erasure.** Deleted vectors' bytes remain
   on disk; only a flag flips. There is currently no compaction step to reclaim
   space or shrink the file.
-- **Every request reloads the full table into memory.** `/insert` and `/search`
-  each open a fresh copy of the table's entire record history rather than sharing
-  one long-lived in-memory table across requests. This is what makes the current
-  locking scheme sufficient (see §4), but it means concurrent requests to a large,
-  busy table each pay a full reload cost rather than sharing one warm copy. Fine
-  for small-to-medium tables; the natural next step if a table gets large and hot
-  is a shared, long-lived table guarded by a read/write lock instead.
-- **`/train`'s `max_iterations` may not be a hard ceiling in all cases** — the
-  underlying clustering loop's iteration cap has an edge case that wasn't
-  reconfirmed as fixed as of this writing. Low risk in normal use; worth a look if
-  untrusted or adversarial data ever reaches this endpoint. A stuck `/train` now
-  only ties up one of the 32 worker threads rather than freezing the whole server,
-  so the blast radius is contained either way.
+- **Inserts and deletes have a short visibility delay (~2 seconds), by design.**
+  Writes are durable immediately; the in-memory table used by search picks them
+  up on a short background cycle rather than instantly. See
+  [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md) for the reasoning.
+  If your use case genuinely needs instant read-after-write visibility, this is
+  worth discussing before relying on it.
 - **Request bodies are capped at 10MB** as a memory-exhaustion guard; very large
   batch inserts should be chunked into multiple requests.
-- **The connection queue is a fixed 256 slots** and the worker pool is a fixed 32
-  threads — neither is currently configurable at runtime. Fine for a single-server
-  deployment; revisit if you ever need to tune these under real load.
+- **The connection queue is a fixed 512 slots** and the worker pool is a fixed
+  128 threads — neither is currently configurable at runtime. Verified to handle
+  up to ~950 concurrent connections cleanly in load testing; behavior right
+  around 1000 concurrent becomes less predictable (still never crashes, but
+  latency or rejection rates rise). See
+  [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md#4-load-test-results)
+  for the full numbers.
+- **Load testing so far covers `/search` only.** `/insert` and `/train` haven't
+  been put through the same concurrency sweep yet.
