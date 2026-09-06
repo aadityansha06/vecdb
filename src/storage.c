@@ -329,3 +329,28 @@ void storage_close(storage_t *storage) {
 
   free(storage);
 }
+
+int storage_remap(storage_t *storage) {
+  if (storage == NULL || storage->fp == NULL)
+    return -1;
+  fseek(storage->fp, 0, SEEK_END);
+  long sz = ftell(storage->fp);
+  size_t new_size = (sz > 0) ? (size_t)sz : 0;
+
+  if (new_size == storage->file_size)
+    return 0;
+  if (storage->mmap_data && storage->mmap_data != MAP_FAILED) {
+    munmap(storage->mmap_data, storage->file_size);
+  }
+
+  storage->file_size = new_size;
+  if (new_size > 0) {
+    storage->mmap_data =
+        mmap(NULL, new_size, PROT_READ, MAP_SHARED, fileno(storage->fp), 0);
+    if (storage->mmap_data == MAP_FAILED)
+      storage->mmap_data = NULL;
+  } else {
+    storage->mmap_data = NULL;
+  }
+  return 0;
+}

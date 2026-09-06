@@ -86,5 +86,5 @@ int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset,
                             Record_t *record, uint64_t dimension);
 
 void storage_close(storage_t *storage);
-
+int storage_remap(storage_t *storage);
 #endif

@@ -172,7 +172,7 @@ static void *sync_worker(void *arg) {
           t->db->records[t->db->count].is_mmap = false;
           t->db->count++;
         }
-
+        storage_remap(t->db->storage);
         pthread_rwlock_unlock(&t->lock);
         t->insert_queue_count = 0;
       }
