@@ -2,9 +2,7 @@
 #include "../../include/pending-delete.h"
 #include <stdint.h>
 #include <math.h>
-
-
-
+#include <string.h>
 
 
 
@@ -21,16 +19,21 @@ for (uint64_t i=0; i<top_k; i++) {
 }
 
 for (uint64_t i=0; i<count; i++) {
-    if (records[i].is_deleted || is_pending_delete(records[i].id, pending_deletes, pending_count)) {
+        if (records[i].is_deleted || is_pending_delete(records[i].id, pending_deletes, pending_count)) {
             continue;
         }
-    float dis = calculate_distance(dimension,records[i].vector,query_vector);
+        
+        float dis = calculate_distance(dimension, records[i].vector, query_vector);
 
-  if (dis < out_results[top_k - 1].calculated_distance) {
+        if (dis < out_results[top_k - 1].calculated_distance) {
             
             int insert_idx = top_k - 1;
             while (insert_idx > 0 && dis < out_results[insert_idx - 1].calculated_distance) {
                 insert_idx--;
+            }
+
+            if (out_results[top_k - 1].metadata != NULL) {
+                free(out_results[top_k - 1].metadata);
             }
 
             for (int j = top_k - 1; j > insert_idx; j--) {
@@ -39,10 +42,14 @@ for (uint64_t i=0; i<count; i++) {
 
             out_results[insert_idx].id = records[i].id;
             out_results[insert_idx].calculated_distance = dis;
-            out_results[insert_idx].metadata = records[i].metadata;
- }
 
-}
+            if (records[i].metadata != NULL) {
+                out_results[insert_idx].metadata = strdup(records[i].metadata);
+            } else {
+                out_results[insert_idx].metadata = NULL;
+            }
+        }
+    }
     return 0;
 
 }

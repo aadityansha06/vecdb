@@ -289,19 +289,19 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
 
       if (dis < out_results[top_k - 1].calculated_distance) {
 
-        int insert_idx = top_k - 1;
+       int insert_idx = top_k - 1;
         while (insert_idx > 0 &&
                dis < out_results[insert_idx - 1].calculated_distance) {
           insert_idx--;
         }
 
-        for (int j = top_k - 1; j > insert_idx; j--) {
-          if (out_results[j].metadata != NULL) {
-            free(out_results[j].metadata);
-          }
-          out_results[j] = out_results[j - 1];
+        if (out_results[top_k - 1].metadata != NULL) {
+            free(out_results[top_k - 1].metadata);
         }
 
+        for (int j = top_k - 1; j > insert_idx; j--) {
+          out_results[j] = out_results[j - 1];
+        }
         out_results[insert_idx].id = temp_record.id;
         out_results[insert_idx].calculated_distance = dis;
 
