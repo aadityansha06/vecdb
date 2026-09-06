@@ -184,6 +184,8 @@ db->pending_deletes = load_pending_deletes(db_name, &db->pending_count);
 
 int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
+pthread_mutex_lock(&insert_lock);
+
   if (db->count == db->capacity) {
     // Handel Out of memory failure
     uint64_t new_capacity = db->capacity * 2;
@@ -191,6 +193,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
         (Record_t *)realloc(db->records, sizeof(Record_t) * new_capacity);
     if (temp_record == NULL) {
       perror("Fatal Error: Failed to insert data due to out of memory \n");
+      pthread_mutex_unlock(&insert_lock);
       return -1;
 
     } else {
@@ -203,6 +206,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
   if (vec_cpy == NULL) {
     perror("Fatal Error: Failed to allocate vector copy\n");
+    pthread_mutex_unlock(&insert_lock);
     return -1;
   }
 
@@ -214,6 +218,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
     if (meta_cpy == NULL) {
       free(vec_cpy);
       perror("Fatal Error: Failed to allocate metadata copy\n");
+      pthread_mutex_unlock(&insert_lock);
       return -1;
     }
   }
@@ -222,7 +227,6 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
   db->records[db->count].vector = vec_cpy;
   db->records[db->count].metadata = meta_cpy;
   db->records[db->count].is_deleted = false;
-    pthread_mutex_lock(&insert_lock);
 
   db->records[db->count].byte_offset = storage_current_offset(db->storage);
   /**
@@ -238,18 +242,18 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
 
   int db_write =
       storage_write_record(db->storage, &db->records[db->count], db->dimension);
-  pthread_mutex_unlock(&insert_lock);
   if (db_write < 0) {
 
     perror("Fatal Error: Failed to write record\n");
     free(vec_cpy);
     if (meta_cpy != NULL)
       free(meta_cpy);
+    pthread_mutex_unlock(&insert_lock);
     return -1;
   }
 
   db->count++;
-
+pthread_mutex_unlock(&insert_lock);
   return 0;
 }
 

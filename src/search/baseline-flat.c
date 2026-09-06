@@ -11,6 +11,7 @@ int flat_search(Record_t *records, uint64_t count, uint64_t dimension,
                 Distance_func calculate_distance, SearchResult_t *out_results,
                 uint64_t *pending_deletes, uint64_t pending_count) {
 
+    if (top_k == 0) return -1;
   for (uint64_t j = 0; j < top_k; j++) {
     out_results[j].calculated_distance = FLT_MAX;
     out_results[j].metadata = NULL;
