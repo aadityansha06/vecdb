@@ -40,6 +40,7 @@ int flat_search(Record_t *records, uint64_t count, uint64_t dimension,
           free(out_results[j].metadata);
         }
         out_results[j] = out_results[j - 1];
+        out_results[j - 1].metadata = NULL;
       }
 
       out_results[insert_idx].id = records[i].id;

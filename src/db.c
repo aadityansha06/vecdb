@@ -301,6 +301,7 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
             free(out_results[j].metadata);
           }
           out_results[j] = out_results[j - 1];
+          out_results[j - 1].metadata = NULL; 
         }
         out_results[insert_idx].id = temp_record.id;
         out_results[insert_idx].calculated_distance = dis;
