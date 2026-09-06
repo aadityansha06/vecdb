@@ -279,6 +279,8 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
       if (temp_record.is_deleted ||
           is_pending_delete(temp_record.id, db->pending_deletes,
                             db->pending_count)) {
+        if (temp_record.metadata)
+          free(temp_record.metadata);
         continue;
       }
 
@@ -308,8 +310,9 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
         } else {
           out_results[insert_idx].metadata = NULL;
         }
-      } else {
       }
+      if (temp_record.metadata)
+        free(temp_record.metadata);
     }
   }
 

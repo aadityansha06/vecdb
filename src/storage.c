@@ -140,7 +140,18 @@ int storage_load_record(storage_t *storage, Record_t *record,
   size_t len = *(size_t *)ptr;
   ptr += sizeof(size_t);
 
-  record->metadata = (len > 0) ? (char *)ptr : NULL;
+  if (len > 0) {
+    char *meta_copy = (char *)malloc(len + 1);
+    if (meta_copy != NULL) {
+      memcpy(meta_copy, ptr, len);
+      meta_copy[len] = '\0';
+    }
+    record->metadata = meta_copy;
+    ptr += len;
+  } else {
+    record->metadata = NULL;
+  }
+
   record->is_mmap = true;
   long bytes_read = (long)(ptr - (storage->mmap_data + current_pos));
   fseek(storage->fp, bytes_read, SEEK_CUR);
@@ -309,11 +320,19 @@ int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset,
 
   record->vector = (float *)ptr;
   ptr += sizeof(float) * dimension;
-
   size_t len = *(size_t *)ptr;
   ptr += sizeof(size_t);
 
-  record->metadata = (len > 0) ? (char *)ptr : NULL;
+  if (len > 0) {
+    char *meta_copy = (char *)malloc(len + 1);
+    if (meta_copy != NULL) {
+      memcpy(meta_copy, ptr, len);
+      meta_copy[len] = '\0';
+    }
+    record->metadata = meta_copy;
+  } else {
+    record->metadata = NULL;
+  }
   return 1;
 }
 
