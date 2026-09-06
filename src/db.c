@@ -222,7 +222,7 @@ int db_insert(FlatDb_t *db, uint32_t id, float *vector, char *metadata) {
   db->records[db->count].vector = vec_cpy;
   db->records[db->count].metadata = meta_cpy;
   db->records[db->count].is_deleted = false;
-
+  db->records[db->count].is_mmap = false;
   db->records[db->count].byte_offset = storage_current_offset(db->storage);
   /**
    * @brief Appends a single vector record to the binary storage file on disk.
@@ -279,9 +279,6 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
       if (temp_record.is_deleted ||
           is_pending_delete(temp_record.id, db->pending_deletes,
                             db->pending_count)) {
-        free(temp_record.vector);
-        if (temp_record.metadata)
-          free(temp_record.metadata);
         continue;
       }
 
@@ -301,7 +298,7 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
             free(out_results[j].metadata);
           }
           out_results[j] = out_results[j - 1];
-          out_results[j - 1].metadata = NULL; 
+          out_results[j - 1].metadata = NULL;
         }
         out_results[insert_idx].id = temp_record.id;
         out_results[insert_idx].calculated_distance = dis;
@@ -313,10 +310,6 @@ int db_ann_search(FlatDb_t *db, float *query_vector, uint64_t top_k,
         }
       } else {
       }
-
-      free(temp_record.vector);
-      if (temp_record.metadata)
-        free(temp_record.metadata);
     }
   }
 
@@ -331,11 +324,13 @@ void db_close(FlatDb_t *db) {
     return;
 
   for (uint64_t i = 0; i < db->count; i++) {
-    if (db->records[i].vector != NULL) {
-      free(db->records[i].vector);
-    }
-    if (db->records[i].metadata != NULL) {
-      free(db->records[i].metadata);
+    if (!db->records[i].is_mmap) {
+      if (db->records[i].vector != NULL) {
+        free(db->records[i].vector);
+      }
+      if (db->records[i].metadata != NULL) {
+        free(db->records[i].metadata);
+      }
     }
   }
 
@@ -383,7 +378,7 @@ int db_delete(FlatDb_t *db, uint64_t id) {
   return -1;
 }
 static int storage_patch_flag(const char *file_name, long offset, bool value) {
-  FILE *fp = fopen(file_name, "r+b"); // NOT append mode
+  FILE *fp = fopen(file_name, "r+b");
   if (fp == NULL)
     return -1;
   if (fseek(fp, offset, SEEK_SET) != 0) {
@@ -391,6 +386,8 @@ static int storage_patch_flag(const char *file_name, long offset, bool value) {
     return -1;
   }
   int ok = (fwrite(&value, sizeof(bool), 1, fp) == 1);
+  fsync(fileno(fp));
+  fsync(fileno(fp));
   fclose(fp);
   return ok ? 0 : -1;
 }

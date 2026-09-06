@@ -36,6 +36,7 @@ typedef struct Record {
   char *metadata;
   bool is_deleted;
   uint64_t byte_offset;
+  bool is_mmap;
 } Record_t;
 
 typedef struct {

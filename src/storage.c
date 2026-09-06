@@ -1,10 +1,8 @@
 /*
-* Copyright (c) 2026 Aadityansha Verma. All rights reserved.
-* This file is licensed under the Business Source License 1.1.
-* See the LICENSE file in the project root for full terms.
-*/
-
-
+ * Copyright (c) 2026 Aadityansha Verma. All rights reserved.
+ * This file is licensed under the Business Source License 1.1.
+ * See the LICENSE file in the project root for full terms.
+ */
 
 #include "../include/storage.h"
 
@@ -18,6 +16,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 storage_t *storage_init(const char *table_name) {
   storage_t *storage = (storage_t *)malloc(sizeof(struct storage));
@@ -43,11 +42,23 @@ storage_t *storage_init(const char *table_name) {
   FILE *touch = fopen(db_path, "a+b");
   if (touch)
     fclose(touch);
-storage->fp = fopen(db_path, "r+b");
+  storage->fp = fopen(db_path, "r+b");
   if (storage->fp == NULL) {
     perror("Fatal Error: Failed to Open file \n");
     free(storage);
     return NULL;
+  }
+  fseek(storage->fp, 0, SEEK_END);
+  long sz = ftell(storage->fp);
+  storage->file_size = (sz > 0) ? (size_t)sz : 0;
+
+  if (storage->file_size > 0) {
+    storage->mmap_data = mmap(NULL, storage->file_size, PROT_READ, MAP_SHARED,
+                              fileno(storage->fp), 0);
+    if (storage->mmap_data == MAP_FAILED)
+      storage->mmap_data = NULL;
+  } else {
+    storage->mmap_data = NULL;
   }
   strncpy(storage->file_name, db_path, sizeof(storage->file_name) - 1);
   storage->file_name[sizeof(storage->file_name) - 1] = '\0';
@@ -89,6 +100,7 @@ int storage_write_record(storage_t *storage, Record_t *record,
   int x = fflush(storage->fp);
   if (x != 0)
     return -1;
+  fsync(fileno(storage->fp));
 
   return 0;
 }
@@ -106,60 +118,32 @@ int storage_write_record(storage_t *storage, Record_t *record,
 
 int storage_load_record(storage_t *storage, Record_t *record,
                         uint64_t dimension) {
-
-  if (storage == NULL || storage->fp == NULL || record == NULL) {
+  if (storage == NULL || storage->mmap_data == NULL || record == NULL)
     return -1;
-  }
 
   long current_pos = ftell(storage->fp);
-  if (current_pos == -1)
-    return -1;
+  if (current_pos < 0 || (size_t)current_pos >= storage->file_size)
+    return 0;
+
   record->byte_offset = (uint64_t)current_pos;
+  uint8_t *ptr = storage->mmap_data + current_pos;
 
-  if (fread(&record->id, sizeof(uint64_t), 1, storage->fp) != 1)
-    return 0; // EOF no record found
+  record->id = *(uint64_t *)ptr;
+  ptr += sizeof(uint64_t);
 
-  if (fread(&record->is_deleted, sizeof(bool), 1, storage->fp) != 1)
-    return -1;
+  record->is_deleted = *(bool *)ptr;
+  ptr += sizeof(bool);
 
-  record->vector = (float *)malloc(sizeof(float) * dimension);
-  if (record->vector == NULL)
-    return -1;
-  if (fread(record->vector, sizeof(float), dimension, storage->fp) != dimension)
-    return -1;
+  record->vector = (float *)ptr;
+  ptr += sizeof(float) * dimension;
 
-  size_t len = 0;
-  if (fread(&len, sizeof(size_t), 1, storage->fp) != 1) {
-    free(record->vector);
-    return -1;
-  }
+  size_t len = *(size_t *)ptr;
+  ptr += sizeof(size_t);
 
-  if (len > 0) {
-    record->metadata = (char *)malloc(sizeof(char) * (len + 1));
-    if (record->metadata == NULL) {
-      free(record->vector);
-
-      return -1;
-    }
-
-    if (fread(record->metadata, sizeof(char), len, storage->fp) != len) {
-      free(record->vector);
-      free(record->metadata);
-
-      return -1;
-    }
-    record->metadata[len] = '\0';
-  } else {
-    record->metadata = NULL;
-  }
-
-  int x = fflush(storage->fp);
-  if (x != 0) {
-    free(record->vector);
-    free(record->metadata);
-
-    return -1;
-  }
+  record->metadata = (len > 0) ? (char *)ptr : NULL;
+  record->is_mmap = true;
+  long bytes_read = (long)(ptr - (storage->mmap_data + current_pos));
+  fseek(storage->fp, bytes_read, SEEK_CUR);
 
   return 1;
 }
@@ -243,7 +227,7 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     return NULL;
   }
 
-cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
+  cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
   if (cluster == NULL) {
     fclose(fp);
     return NULL;
@@ -288,7 +272,7 @@ cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
       fclose(fp);
       return NULL;
     }
-cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].count);
+    cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].count);
 
     if (cluster[i].count > 0) {
       read = fread(cluster[i].byte_offsets, sizeof(uint64_t), cluster[i].count,
@@ -312,60 +296,33 @@ cluster[i].byte_offsets = malloc(sizeof(uint64_t) * cluster[i].count);
 
 int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset,
                             Record_t *record, uint64_t dimension) {
-  if (storage == NULL || storage->fp == NULL || record == NULL) {
-    return -1;
-  }
-
-  if (fseek(storage->fp, byte_offset, SEEK_SET) != 0) {
-    return -1;
-  }
-
-  if (fread(&record->id, sizeof(uint64_t), 1, storage->fp) != 1)
-    return 0; // EOF
-
-  if (fread(&record->is_deleted, sizeof(bool), 1, storage->fp) != 1)
+  if (!storage || !storage->mmap_data || byte_offset >= storage->file_size)
     return -1;
 
-  record->vector = (float *)malloc(sizeof(float) * dimension);
-  if (record->vector == NULL)
-    return -1;
+  uint8_t *ptr = storage->mmap_data + byte_offset;
 
-  if (fread(record->vector, sizeof(float), dimension, storage->fp) !=
-      dimension) {
-    free(record->vector);
-    return -1;
-  }
+  record->id = *(uint64_t *)ptr;
+  ptr += sizeof(uint64_t);
 
-  size_t len = 0;
-  if (fread(&len, sizeof(size_t), 1, storage->fp) != 1) {
-    free(record->vector);
-    return -1;
-  }
+  record->is_deleted = *(bool *)ptr;
+  ptr += sizeof(bool);
 
-  if (len > 0) {
-    record->metadata = (char *)malloc(sizeof(char) * (len + 1));
-    if (record->metadata == NULL) {
-      free(record->vector);
-      return -1;
-    }
+  record->vector = (float *)ptr;
+  ptr += sizeof(float) * dimension;
 
-    if (fread(record->metadata, sizeof(char), len, storage->fp) != len) {
-      free(record->vector);
-      free(record->metadata);
-      return -1;
-    }
-    record->metadata[len] = '\0';
-  } else {
-    record->metadata = NULL;
-  }
+  size_t len = *(size_t *)ptr;
+  ptr += sizeof(size_t);
 
+  record->metadata = (len > 0) ? (char *)ptr : NULL;
   return 1;
 }
 
 void storage_close(storage_t *storage) {
   if (storage == NULL)
     return;
-
+  if (storage->mmap_data && storage->mmap_data != MAP_FAILED) {
+    munmap(storage->mmap_data, storage->file_size);
+  }
   if (storage->fp != NULL) {
     fclose(storage->fp);
   }
