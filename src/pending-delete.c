@@ -91,3 +91,34 @@ int clear_pending_deletes(const char *db_name) {
     }
     return -1;
 }
+
+
+
+/* 0 on success; -1 if it didn't exist(don't panic bro then have to delet manual)
+ * */
+
+int set_auto_delete_schedule(const char *db_name, uint64_t unix_timestamp) {
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "origin_data/%s/auto_delete_schedule.bin", db_name);
+    FILE *fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+    size_t written = fwrite(&unix_timestamp, sizeof(uint64_t), 1, fp);
+    fclose(fp);
+    return (written == 1) ? 0 : -1;
+}
+
+uint64_t get_auto_delete_schedule(const char *db_name) {
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "origin_data/%s/auto_delete_schedule.bin", db_name);
+    FILE *fp = fopen(filepath, "rb");
+    if (!fp) return 0;
+    uint64_t ts = 0;
+    if (fread(&ts, sizeof(uint64_t), 1, fp) != 1) ts = 0;
+    fclose(fp);
+    return ts;
+}
+
+int clear_auto_delete_schedule(const char *db_name) {
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "origin_data/%s/auto_delete_schedule.bin", db_name);
+    return remove(filepath); }

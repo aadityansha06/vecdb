@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+#include <inttypes.h>
 
 static pthread_mutex_t insert_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -393,4 +395,43 @@ static int storage_patch_flag(const char *file_name, long offset, bool value) {
   fsync(fileno(fp));
   fclose(fp);
   return ok ? 0 : -1;
+}
+
+
+
+
+
+int check_and_run_auto_delete(FlatDb_t *db, const char *db_name) {
+  if (db == NULL || db_name == NULL) return -1;
+
+  uint64_t scheduled_time = get_auto_delete_schedule(db_name);
+  if (scheduled_time == 0) return 0; /* nothing scheduled */
+
+  uint64_t now = (uint64_t)time(NULL);
+  if (now < scheduled_time) return 0; /* not due yet */
+
+  uint64_t pending_count = 0;
+  uint64_t *pending_ids = load_pending_deletes(db_name, &pending_count);
+  if (pending_count == 0 || pending_ids == NULL) {
+    if (pending_ids) free(pending_ids);
+    clear_auto_delete_schedule(db_name);
+    return 0;
+  }
+
+  uint64_t success_count = 0;
+  for (uint64_t i = 0; i < pending_count; i++) {
+    if (db_delete(db, pending_ids[i]) == 0) {
+      success_count++;
+    }
+  }
+
+  free(pending_ids);
+  clear_pending_deletes(db_name);
+  clear_auto_delete_schedule(db_name);
+
+  printf("[auto-delete] Table '%s': scheduled time reached, executed %" PRIu64
+         " of %" PRIu64 " queued deletions.\n",
+         db_name, success_count, pending_count);
+
+  return (int)success_count;
 }

@@ -22,6 +22,36 @@ out locally, by a human, on the server itself. Read the full design here:
   connections).
 
 
+
+## Where This Fits
+
+OriginDB is built around one trade-off: deletion requires a human, on
+purpose (see [Delete-architecture](write-up/Delete-architecture.md)). That
+makes it a good fit for systems that are **read-heavy, security-sensitive,
+and don't delete often** — and a poor fit for anything that deletes
+constantly as part of normal operation.
+
+**Good fit:**
+- A bank's transaction/document search — records get inserted and searched
+  constantly, almost never deleted, and a leaked key must never be able to
+  wipe history.
+- A government records or compliance archive — write-once-ish, read-heavy,
+  deletion is a rare, deliberate, audited event, not a routine action.
+- A song/media recommendation catalog — catalog entries are inserted in
+  batches and searched heavily; removing a track is infrequent and can wait
+  for a human to confirm.
+- An internal analytics/BI dataset — ingested periodically, queried often,
+  rarely if ever needs individual records removed on demand.
+
+**Poor fit (for now):**
+- A chat app, social feed, or anything where users routinely delete their
+  own content in real time — this design assumes deletion is the exception,
+  not a constant background operation.
+- Any system needing instant delete visibility with no review step — the
+  deferred-delete model is the point of this project, not a limitation to
+  route around.
+
+
 # Why this exists
 
 This started as a toy project to learn how to write a scalable C codebase and implement low level memory management and optimize performance. There wasn't anything unique I'm solving in it, and pretending otherwise would just be bluffing. There are excellent vector databases already (pgvector, Faiss, sqlite vec, Qdrant...).

@@ -1,11 +1,8 @@
 /*
-* Copyright (c) 2026 Aadityansha Verma. All rights reserved.
-* This file is licensed under the Business Source License 1.1.
-* See the LICENSE file in the project root for full terms.
-*/
-
-
-
+ * Copyright (c) 2026 Aadityansha Verma. All rights reserved.
+ * This file is licensed under the Business Source License 1.1.
+ * See the LICENSE file in the project root for full terms.
+ */
 
 #include "../include/terminal.h"
 #include "../include/api-key-generate.h"
@@ -18,8 +15,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
-
 /* Return codes for handle_command(): whether the REPL should keep going. */
 #define TUI_CONTINUE 1
 #define TUI_EXIT 0
@@ -49,6 +46,24 @@ static void print_help(void) {
   printf("  origin server [port]\n");
   printf("      Launch the TCP server (blocking). Defaults to port 8080.\n");
   printf("      example: origin server 9090\n\n");
+
+  printf("  origin set-auto-delete <table> <days_from_now>\n");
+  printf("      Admin-only. Schedules <table>'s pending-delete queue to run\n");
+  printf("      automatically once that many days pass. 0 = due at the next\n");
+  printf("      server check (~2 sec). Run again anytime to reschedule --\n");
+  printf("      e.g. push a run from today to tomorrow.\n");
+  printf("      If you never run this, nothing auto-deletes: you must run\n");
+  printf("      'origin delete' or 'origin process-deletes' manually.\n");
+  printf("      example: origin set-auto-delete movies 1\n\n");
+  printf("  origin auto-delete-status <table>\n");
+  printf("      Show whether auto-delete is scheduled for <table>, and how\n");
+  printf("      long until it fires.\n");
+  printf("      example: origin auto-delete-status movies\n\n");
+  printf("  origin cancel-auto-delete <table>\n");
+  printf("      Cancel a scheduled auto-delete for <table>. Manual delete\n");
+  printf("      commands keep working either way.\n");
+  printf("      example: origin cancel-auto-delete movies\n\n");
+
   printf("  origin --help, origin help\n");
   printf("      Show this message.\n\n");
   printf("  origin --exit, origin exit\n");
@@ -350,20 +365,21 @@ static int handle_command(char *command, FlatDb_t **master_db) {
     return TUI_CONTINUE;
   }
   /*@Cmd-Delete (Manual CLI Delete) */
-if (strcmp(arg, "delete") == 0) {
+  if (strcmp(arg, "delete") == 0) {
     if (*master_db == NULL) {
-      printf("Error: No database open. Run 'origin init ...' or 'origin open ...' first.\n");
+      printf("Error: No database open. Run 'origin init ...' or 'origin open "
+             "...' first.\n");
       return TUI_CONTINUE;
     }
-    
+
     if (words != 3) {
       printf("Usage: origin delete <id>\n");
       printf("  example: origin delete 42\n");
       return TUI_CONTINUE;
     }
 
-    uint64_t id_to_delete; 
-    
+    uint64_t id_to_delete;
+
     if (sscanf(command, "%*s %*s %" SCNu64, &id_to_delete) < 1) {
       printf("Error: <id> must be a valid positive integer.\n");
       printf("Usage: origin delete <id>\n");
@@ -371,11 +387,14 @@ if (strcmp(arg, "delete") == 0) {
     }
 
     if (db_delete(*master_db, id_to_delete) == 0) {
-      printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n", id_to_delete);
+      printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n",
+             id_to_delete);
     } else {
-      printf("Error: Vector ID %" PRIu64 " not found, already deleted, or disk write failed.\n", id_to_delete);
+      printf("Error: Vector ID %" PRIu64
+             " not found, already deleted, or disk write failed.\n",
+             id_to_delete);
     }
-    
+
     return TUI_CONTINUE;
   }
 
@@ -392,24 +411,31 @@ if (strcmp(arg, "delete") == 0) {
 
     if (pending_count == 0 || pending_ids == NULL) {
       printf("No pending delete requests found for table '%s'.\n", db_name);
-      if (pending_ids) free(pending_ids);
+      if (pending_ids)
+        free(pending_ids);
       return TUI_CONTINUE;
     }
 
-    printf("\n[WARNING] %" PRIu64 " records are queued for deletion in table '%s'.\n", pending_count, db_name);
+    printf("\n[WARNING] %" PRIu64
+           " records are queued for deletion in table '%s'.\n",
+           pending_count, db_name);
     printf("Proceed with permanent disk deletion? (y/n): ");
-    
+
     char confirm;
-    if (scanf(" %c", &confirm) != 1) confirm = 'n';
-    
+    if (scanf(" %c", &confirm) != 1)
+      confirm = 'n';
+
     int c;
-    while ((c = getchar()) != '\n' && c != EOF);
+    while ((c = getchar()) != '\n' && c != EOF)
+      ;
 
     if (confirm == 'y' || confirm == 'Y') {
-      
+
       FlatDb_t *temp_db = db_open(db_name);
       if (temp_db == NULL) {
-        printf("Error: Could not open table '%s'. It may be corrupted or missing.\n", db_name);
+        printf("Error: Could not open table '%s'. It may be corrupted or "
+               "missing.\n",
+               db_name);
         free(pending_ids);
         return TUI_CONTINUE;
       }
@@ -424,11 +450,14 @@ if (strcmp(arg, "delete") == 0) {
       db_close(temp_db);
       clear_pending_deletes(db_name);
 
-      printf("SUCCESS: Executed %" PRIu64 " actual deletions. (%" PRIu64 " invalid or already-deleted IDs were ignored).\n", 
+      printf("SUCCESS: Executed %" PRIu64 " actual deletions. (%" PRIu64
+             " invalid or already-deleted IDs were ignored).\n",
              success_count, pending_count - success_count);
-      
+
       if (*master_db != NULL) {
-          printf("Note: If '%s' is your currently open table, you must restart the terminal to refresh your local RAM state.\n", db_name);
+        printf("Note: If '%s' is your currently open table, you must restart "
+               "the terminal to refresh your local RAM state.\n",
+               db_name);
       }
     } else {
       printf("Operation aborted. The queue remains untouched.\n");
@@ -438,7 +467,79 @@ if (strcmp(arg, "delete") == 0) {
     return TUI_CONTINUE;
   }
 
-  printf("Unknown command 'origin %s'. Try 'origin --help' for the list of commands.\n", arg);
+  /*@Cmd-set-auto-delete (Admin schedules/reschedules automatic execution) */
+  if (strcmp(arg, "set-auto-delete") == 0) {
+    if (words != 4) {
+      printf("Usage: origin set-auto-delete <table> <days_from_now>\n");
+      printf("  example: origin set-auto-delete movies 1   (schedules ~24h "
+             "from now)\n");
+      printf("  example: origin set-auto-delete movies 0   (due as soon as the "
+             "server next checks)\n");
+      printf("  Calling this again before the scheduled time arrives simply "
+             "replaces it --\n");
+      printf("  use it to push a scheduled run earlier or later, any time.\n");
+      return TUI_CONTINUE;
+    }
+
+    uint64_t days =
+        dimension; /* the 4th token, already parsed by the sscanf above */
+    uint64_t scheduled_time = (uint64_t)time(NULL) + (days * 86400ULL);
+
+    if (set_auto_delete_schedule(db_name, scheduled_time) == 0) {
+      printf("SUCCESS: Table '%s' pending-delete queue will auto-execute in "
+             "%" PRIu64 " day(s) (Unix time %" PRIu64 ").\n",
+             db_name, days, scheduled_time);
+      printf("Run 'origin set-auto-delete %s <days>' again anytime to "
+             "reschedule.\n",
+             db_name);
+    } else {
+      printf("Error: Failed to write auto-delete schedule for table '%s'.\n",
+             db_name);
+    }
+    return TUI_CONTINUE;
+  }
+
+  /*@Cmd-auto-delete-status */
+  if (strcmp(arg, "auto-delete-status") == 0) {
+    if (words != 3) {
+      printf("Usage: origin auto-delete-status <table>\n");
+      return TUI_CONTINUE;
+    }
+    uint64_t scheduled_time = get_auto_delete_schedule(db_name);
+    if (scheduled_time == 0) {
+      printf("Auto-delete is not scheduled for table '%s'.\n", db_name);
+    } else {
+      uint64_t now = (uint64_t)time(NULL);
+      if (now >= scheduled_time) {
+        printf("Auto-delete for table '%s' is due -- it will run the next time "
+               "the server checks.\n",
+               db_name);
+      } else {
+        uint64_t hours_left = (scheduled_time - now) / 3600;
+        printf("Auto-delete for table '%s' is scheduled in ~%" PRIu64
+               " hour(s).\n",
+               db_name, hours_left);
+      }
+    }
+    return TUI_CONTINUE;
+  }
+
+  /*@Cmd-cancel-auto-delete */
+  if (strcmp(arg, "cancel-auto-delete") == 0) {
+    if (words != 3) {
+      printf("Usage: origin cancel-auto-delete <table>\n");
+      return TUI_CONTINUE;
+    }
+    clear_auto_delete_schedule(db_name);
+    printf("Auto-delete schedule cleared for table '%s' (manual 'origin "
+           "delete'/'process-deletes' still work anytime).\n",
+           db_name);
+    return TUI_CONTINUE;
+  }
+
+  printf("Unknown command 'origin %s'. Try 'origin --help' for the list of "
+         "commands.\n",
+         arg);
   return TUI_CONTINUE;
 }
 

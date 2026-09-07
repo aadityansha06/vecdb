@@ -24,14 +24,31 @@ Start the engine:
 | `origin insert <id> [metadata]` | Insert a vector into the open table. Prompts for the vector's floats afterward. `metadata` is a single word (no spaces). |
 | `origin search <top_k>` | Exact nearest-neighbor search against the open table. Prompts for the query vector's floats. |
 | `origin delete <id>` | **Admin-only, immediate.** Marks a record as deleted (tombstoned — the vector bytes stay on disk, only a flag flips) both in memory and on disk, right away. Use this for ad-hoc local cleanup. |
+
 | `origin process-deletes <table>` | **Admin-only, batch.** Executes every delete request currently queued for `<table>` by the network's `/delete-request` endpoint (see §2.4). Shows the number of pending records and asks for `y`/`n` confirmation before touching anything. Ids that don't correspond to a real record, or were already deleted, are silently skipped and reported as ignored in the summary. Clears the queue afterward. |
+| `origin set-auto-delete <table> <days_from_now>` | **Admin-only.** Schedules the table's pending-delete queue to execute automatically once the given number of days has passed — `0` means "due at the server's next check" (checked every ~2 seconds while the server is running). Calling this again before the scheduled time arrives simply replaces it, so you can push a run earlier or later at any time, e.g. reschedule from "today" to "tomorrow" by running it again with a new value. |
+| `origin auto-delete-status <table>` | **Admin-only.** Shows whether auto-delete is currently scheduled for `<table>`, and roughly how long until it fires. |
+| `origin cancel-auto-delete <table>` | **Admin-only.** Cancels a scheduled auto-delete for `<table>`. Manual `origin delete`/`origin process-deletes` continue to work regardless of whether a schedule is set. |
 | `origin server [port]` | Start the TCP server (blocking; default port 8080). |
 | `origin --help` / `origin --exit` | Help / quit. |
 
 Deletion in OriginDB is split into two steps by design: **requesting** a deletion
 can be done over the network with a normal API key, but **executing** one can only
-happen here, locally, with an explicit human confirmation. See
-[`Delete-architecture.md`](Delete-architecture.md) for the full reasoning — in
+happen here, locally, with an explicit human confirmation.
+<br>
+
+**By default, nothing executes automatically — ever.** A queued delete-request
+sits untouched until an administrator explicitly runs `origin delete` or
+`origin process-deletes`. Auto-delete scheduling is an optional, opt-in
+convenience for tables where the queue may otherwise grow faster than a human
+can review it: an administrator can set a schedule (`origin set-auto-delete`),
+and only once that schedule arrives does the queue execute without further
+confirmation. If you never set a schedule for a table, its pending-delete
+queue will sit there indefinitely until you process it by hand — there is no
+implicit timeout.
+<br>
+
+See[`Delete-architecture.md`](Delete-architecture.md) for the full reasoning — in
 short, a leaked API key can queue delete requests, but can never cause an actual
 deletion on its own.
 

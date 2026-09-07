@@ -197,7 +197,7 @@ accidentally reintroduced later:
   local/terminal-side only, never echoed to a network-reachable log or dashboard,
   or the same distinction leaks back out through a different door.
 
-## 8. What this design does and doesn't claim
+## What this design does and doesn't claim
 
 **Does claim:** an API key, however compromised, can never cause a single byte of
 real data to be deleted on its own. The most it can do is queue a request that a
@@ -207,3 +207,162 @@ human must knowingly approve before anything happens.
 general, or that it's a complete access-control system. It's a narrow, specific
 guarantee about one operation, deletion, achieved by removing the network's
 ability to directly execute it, not a general security hardening claim.
+
+
+
+
+<br>
+
+## 8.What happens when the queue grows faster than a human can review it
+
+The design in §6 assumes an administrator checks in and processes the queue
+periodically. That's a reasonable assumption for the use case this is built
+for — read-heavy systems (a bank's records, a government dataset, a catalog)
+where deletes are the exception, not the norm, not a chat app or anything with
+constant real-time deletion. But "reasonable assumption" isn't a guarantee, and
+it's worth being explicit about what happens if it doesn't hold: heavy
+legitimate delete traffic, an administrator who's unavailable for an extended
+stretch, or simply a system that's grown past the scale this was originally
+designed for.
+
+### The naive fix, and why it reopens the exact hole this design closes
+
+An obvious answer is: once the queue hits some size threshold, auto-execute
+it, no human needed. This is a mistake, and it's worth spelling out why, since
+it's the same shape of problem as the oracle in §7, just aimed at a different
+part of the system: **a trigger condition that's controllable by the same
+party the design is supposed to be defending against isn't a trigger, it's a
+lever**. If "queue reaches N entries" auto-executes a real deletion, then
+whoever holds a leaked key can simply send exactly N delete-requests whenever
+they want, and they've fully reconstructed the "network can delete data
+directly" capability this entire architecture exists to remove — they've just
+relabeled their own spam as the thing that pulled the trigger. Size-based
+auto-execution doesn't add a safeguard, it hands the attacker a dial.
+
+### What this design does instead: time-gated auto-execution, human-gated by default
+
+The queue's default behavior is unchanged: nothing executes without a human
+running `origin process-deletes` and confirming. On top of that, each table
+can optionally be configured with an **auto-expiry duration** (for example,
+30 days). A queued entry that's still sitting there after that duration
+executes automatically, the same way it would if a human had confirmed it.
+
+The reason this is safe where size-based triggering isn't: **time cannot be
+manufactured by an attacker.** Flooding the queue with junk entries changes
+how *much* is in it, never how *fast* the clock moves. An attacker can make
+the queue bigger; they cannot make 30 days pass any sooner. This closes the
+"what if nobody ever checks" gap without reopening the "attacker controls
+when deletion happens" gap that a size trigger would.
+
+Auto-expiry is meant as a safety net for neglect, not the primary path. The
+primary path stays a human reviewing a manageable queue promptly, same as
+§6 — the expiry timer is there so an unattended table doesn't accumulate
+tombstoned-in-spirit records indefinitely if nobody gets to it.
+
+### Getting ahead of the timer: notification before expiry, not just at expiry
+
+A time-based fallback is only actually useful if a human finds out *before*
+it fires, not after. Alongside auto-expiry, the queue can be configured to
+notify an administrator (email, webhook, whatever the deployment already
+uses) once it crosses a configurable size or age threshold well short of the
+expiry window — for example, "50 new entries since the queue was last
+processed." This is a nudge, not a trigger: crossing it does nothing to the
+data, it only tells a human to go look. The goal is that in the common case,
+a person acts on the notification and processes the queue manually long
+before the expiry timer would ever need to fire on its own.
+
+### What this section does and doesn't claim
+
+**Does claim:** a busy or temporarily unattended table doesn't accumulate an
+unbounded backlog forever, and the mechanism that prevents that can't be
+turned into an attacker-controlled deletion trigger the way a size-based
+threshold could.
+
+**Does not claim:** this makes unattended auto-expiry equivalent in safety to
+a human confirming every deletion. It isn't — it's a deliberate trade of a
+small amount of the core guarantee (some deletions may eventually execute
+without a specific human ever looking at that specific batch) in exchange for
+not requiring indefinite manual attention. Whether that trade is acceptable
+depends on the deployment; it's why the expiry window is admin-configured
+rather than fixed, and why it defaults to off rather than on.
+
+
+## 9. How this compares to timestamp-based tombstone systems (e.g. Cassandra)
+
+Tombstones aren't unique to this design — LSM-tree systems like Cassandra and
+ScyllaDB have used them for years, but for a different purpose and with
+different guarantees. Worth being precise about how theirs work and where
+this design diverges, rather than gesturing vaguely at "similar to Cassandra."
+
+### How it works in Cassandra-style systems
+
+- **Tombstones there are timestamp-driven, not confirmation-driven.** A delete
+  writes a tombstone with a timestamp; if a later write arrives for the same
+  primary key with a newer timestamp, the tombstone is superseded and the new
+  data becomes live again automatically. No human decides this either way —
+  it falls out of last-write-wins conflict resolution, which is exactly what
+  a distributed, multi-writer system needs it for.
+- **Tombstones expire automatically**, via a background compaction process,
+  after a configured window (Cassandra's `gc_grace_seconds`, commonly days to
+  weeks). Before that window closes, the original data is still physically
+  present and technically recoverable by an administrator inspecting the
+  underlying storage files. Once compaction runs, it's gone permanently —
+  compaction, not a human decision, is what makes deletion final.
+- **This has a direct security consequence worth naming.** If an attacker
+  gets in and runs ordinary `DELETE` statements (say, via injection), the
+  data is generally recoverable, *as long as* an administrator notices and
+  acts before compaction closes that window. If the attacker instead runs
+  something structural like `DROP TABLE`, that bypasses the tombstone
+  mechanism entirely — the underlying files are removed immediately, with no
+  recovery window at all, tombstones or not.
+
+### Where this design diverges, and why
+
+**The trigger for execution is different in kind, not just in timing.**
+Cassandra's tombstones exist to resolve *when two writes disagree*, and their
+expiry is a storage-reclamation mechanism, not a security boundary — anyone
+with write access to the table can already cause a delete or an overwrite:
+the tombstone doesn't gate who can delete, only how long the old value stays
+recoverable afterward. This design's queue exists specifically to gate *who
+can cause a deletion to become real* in the first place: nothing overwrites
+or executes automatically based on timestamps or conflicting writes, and by
+default nothing executes automatically on any schedule either — only an
+explicit local confirmation (§6), or, if the optional feature from §8 is
+turned on, a deliberately time-gated fallback that an administrator
+configured on purpose.
+
+**The "can it be recovered after an attack" question has a different answer
+here, for a structural reason rather than a timing one.** In a Cassandra-style
+system, an attacker who successfully deletes data still leaves you dependent
+on noticing in time, before compaction closes the window. In this design, an
+attacker holding a leaked API key can't get that far in the first place —
+there is no network route that flips the deleted flag or removes anything, at
+any point, regardless of timing (§1, §5). Their leaked key gets them exactly
+as far as writing entries into a queue that changes nothing on its own. The
+Cassandra comparison that actually lines up is: their "ordinary `DELETE`,
+recoverable if you're fast enough" case is the *best* case an attacker there
+can achieve, while in this design that same attacker never reaches even that
+much — there's no tombstone flipped, no data touched, nothing time-sensitive
+to race against.
+
+### What this comparison does and doesn't claim
+
+**Does claim:** the two systems solve genuinely different problems with
+superficially similar-looking mechanics. Cassandra's tombstone-and-compaction
+pattern is built for correctness under concurrent, distributed writes, with
+recoverability as a side effect of the compaction delay. This design's queue
+is built specifically to prevent a leaked credential from ever causing a real
+deletion unassisted, with the "human confirms" step as the actual security
+boundary, not a side effect of a storage-cleanup schedule.
+
+**Does not claim:** this design defends against everything a full database
+system's DROP/schema-level operations or infrastructure-level attacks would
+need defending against. Like Cassandra's tombstones against a `DROP TABLE`,
+nothing here helps against an attacker who can act at the filesystem or
+infrastructure level — full-disk encryption/wipe, ransomware, or physical
+access to the server bypass the entire deferred-delete mechanism the same way
+they'd bypass any tombstone scheme. This design is scoped to one thing: what
+a leaked *API key* can and can't do over the network. It was never meant to
+be, and isn't, a substitute for infrastructure security, backups, or disk
+encryption.
+

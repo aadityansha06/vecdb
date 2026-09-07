@@ -194,6 +194,9 @@ static void *sync_worker(void *arg) {
         t->pending_delete_dirty = false;
       }
       pthread_mutex_unlock(&t->pending_dirty_lock);
+      pthread_rwlock_wrlock(&t->lock);
+      check_and_run_auto_delete(t->db, t->name);
+      pthread_rwlock_unlock(&t->lock);
     }
     pthread_mutex_unlock(&open_tables_lock);
   }

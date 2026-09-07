@@ -99,4 +99,17 @@ void db_close(FlatDb_t *db);
 
 int db_delete(FlatDb_t *db, uint64_t id);
 
+
+/* Checks whether db_name's auto-delete schedule has arrived; if so, executes
+ * every currently queued delete against `db`, clears the queue, and clears
+ * the schedule. No-op if no schedule is set or it hasn't arrived yet.
+ * Returns the number of records deleted (0 = nothing ran), or -1 on error. */
+int check_and_run_auto_delete(FlatDb_t *db, const char *db_name);
+
+
+
+
+
+
+
 #endif
