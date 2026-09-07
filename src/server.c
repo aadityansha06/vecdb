@@ -3,6 +3,7 @@
  * This file is licensed under the Business Source License 1.1.
  * See the LICENSE file in the project root for full terms.
  */
+#define _GNU_SOURCE
 
 #include "../include/server.h"
 #include "../include/pending-delete.h"
@@ -11,7 +12,6 @@
 #include <stdbool.h>
 #include <unistd.h>
 #define MAX_TOP_K 10000
-
 #define THREAD_POOL_SIZE 128
 #define QUEUE_SIZE 512
 #define MAX_OPEN_TABLES 32
@@ -322,10 +322,11 @@ static void handel_client(server_data_t *server) {
   }
 
   int content_length = 0;
-  char *cl_ptr = strstr(header_buffer, "Content-Length: ");
-  if (cl_ptr) {
-    content_length = atoi(cl_ptr + 16);
-  }
+ char *cl_ptr = strcasestr(header_buffer, "Content-Length:");
+if (cl_ptr) {
+    cl_ptr += strlen("Content-Length:");
+    content_length = atoi(cl_ptr);
+}
 
   /* @Guardrail: 10MB limit to prevent memory exhaustion attacks
    */
