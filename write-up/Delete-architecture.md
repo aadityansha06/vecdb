@@ -366,3 +366,57 @@ a leaked *API key* can and can't do over the network. It was never meant to
 be, and isn't, a substitute for infrastructure security, backups, or disk
 encryption.
 
+## 10. FAQ — "Isn't this just a tombstone / soft-delete, like everything else?"
+
+This question comes up constantly, so here it is answered directly rather than
+folded into prose elsewhere.
+
+**Q: Postgres has soft-delete (`deleted_at` columns), and LSM stores like
+Cassandra have tombstones. What does OriginDB actually do differently?**
+
+A: Those two mechanisms — app-level soft-delete and LSM tombstones — share one
+property that OriginDB deliberately breaks: in both, *request and execution
+are the same action*. Whoever holds write access sends one command, and that
+command immediately writes the real tombstone (or sets `deleted_at`/`xmax`) to
+durable storage, right then, over the network. Compaction or `VACUUM` later
+just reclaims disk space; it doesn't undo anything, because the row was
+already dead the instant the write landed. OriginDB splits that single action
+into two, in two non-overlapping trust domains (§2): a network-authenticated
+request that only ever appends to `pending.bin`, and a local, human-confirmed
+execution that's the only code path that ever flips `is_deleted` on disk (§5,
+§6).
+
+**Q: So what can a leaked API key actually do in each system?**
+
+A:
+| | Postgres soft-delete / app `deleted_at` | Cassandra-style LSM tombstone | OriginDB |
+|---|---|---|---|
+| Who can trigger the *real* tombstone/flag write | Anyone with the write credential, remotely, immediately | Anyone with write access, remotely, immediately | Only a human with local shell access, after confirming (§6) |
+| Blast radius of a leaked credential | Every row soft-deleted for real, instantly | Every row tombstoned for real, instantly | A queue of *candidate* ids — zero bytes of real data change (§5) |
+| What "undo" looks like after the leak | Restore from backup/WAL before the row is hard-deleted or the column is trusted | Restore/replay before `gc_grace_seconds` compaction closes the window (§9) | Don't run `process-deletes` (or cancel the auto-expiry, §8) — nothing was ever touched |
+| What compaction/VACUUM does | Reclaims space for rows already soft/hard-deleted | Reclaims space for tombstones that already took effect | N/A today — OriginDB doesn't reclaim space yet (see Known Limitations), but that's an orthogonal storage question, not a security one |
+
+**Q: Isn't "pending, excluded from search" basically the same as a tombstone,
+just with extra steps?**
+
+A: No — the extra step is the entire point, not overhead. A tombstone (LSM or
+soft-delete column) *is* the real deletion already having happened; excluding
+it from reads afterward is just a side effect of that. A `pending.bin` entry
+is the opposite order: it excludes the record from search (§4) as a UX
+courtesy, while the record's on-disk bytes and its `is_deleted` flag remain
+completely untouched until a human explicitly says so (§6). You can delete
+every entry in `pending.bin` with zero writes to `data.db` ever happening, an
+option that doesn't exist once a real tombstone has been written.
+
+**Q: Then why not just call it "permission-gated delete" — isn't that the
+same idea?**
+
+A: Permission gating still leaves one code path where "network request → data
+gone" is reachable, just behind a permission check. The whole design goal here
+is that this code path doesn't exist at all (§1, §2) — there's no
+misconfiguration, no missing check, no privilege-escalation bug that could
+turn `/delete-request` into an actual delete, because `/delete-request` never
+calls `db_delete` under any input. That's a structural guarantee, not an
+access-control one.
+
+
