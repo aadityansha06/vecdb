@@ -87,4 +87,6 @@ int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset,
 
 void storage_close(storage_t *storage);
 int storage_remap(storage_t *storage);
+
+int storage_compact(storage_t *storage, Record_t **records_ptr, uint64_t *count, uint64_t dimension);
 #endif

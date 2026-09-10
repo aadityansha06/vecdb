@@ -144,6 +144,11 @@ middle state to the last one.
   correspond to a real record are looked up here for the first time, and simply
   no-op (this is where existence gets resolved, not at request time). Ids already
   deleted in a previous run also just no-op.
+- If at least one id was actually deleted, compacts the table once for the
+  whole batch — rewrites `data.db` keeping only the surviving records, so the
+  tombstoned bytes are physically gone rather than sitting in the file
+  indefinitely (see §11). This runs once per `process-deletes` invocation,
+  not once per id.
 - Clears `pending.bin` afterward.
 
 ## 7. Why existence is never checked at request time (the oracle problem)
@@ -213,7 +218,7 @@ ability to directly execute it, not a general security hardening claim.
 
 <br>
 
-## 8.What happens when the queue grows faster than a human can review it
+## 8. What happens when the queue grows faster than a human can review it
 
 The design in §6 assumes an administrator checks in and processes the queue
 periodically. That's a reasonable assumption for the use case this is built
@@ -246,6 +251,9 @@ running `origin process-deletes` and confirming. On top of that, each table
 can optionally be configured with an **auto-expiry duration** (for example,
 30 days). A queued entry that's still sitting there after that duration
 executes automatically, the same way it would if a human had confirmed it.
+Compaction runs exactly the same way here as in §6 — once per scheduled run,
+not per record — so an unattended table that finally hits its expiry window
+doesn't just get tombstoned, its reclaimed bytes actually leave the file too.
 
 The reason this is safe where size-based triggering isn't: **time cannot be
 manufactured by an attacker.** Flooding the queue with junk entries changes
@@ -394,7 +402,7 @@ A:
 | Who can trigger the *real* tombstone/flag write | Anyone with the write credential, remotely, immediately | Anyone with write access, remotely, immediately | Only a human with local shell access, after confirming (§6) |
 | Blast radius of a leaked credential | Every row soft-deleted for real, instantly | Every row tombstoned for real, instantly | A queue of *candidate* ids — zero bytes of real data change (§5) |
 | What "undo" looks like after the leak | Restore from backup/WAL before the row is hard-deleted or the column is trusted | Restore/replay before `gc_grace_seconds` compaction closes the window (§9) | Don't run `process-deletes` (or cancel the auto-expiry, §8) — nothing was ever touched |
-| What compaction/VACUUM does | Reclaims space for rows already soft/hard-deleted | Reclaims space for tombstones that already took effect | N/A today — OriginDB doesn't reclaim space yet (see Known Limitations), but that's an orthogonal storage question, not a security one |
+| What compaction/VACUUM does | Reclaims space for rows already soft/hard-deleted | Reclaims space for tombstones that already took effect | Runs automatically once per confirmed batch (§6) or scheduled auto-expiry run (§8) — reclaims space the same way, just gated behind the same human-or-timer trigger as the deletion itself, not on its own independent schedule |
 
 **Q: Isn't "pending, excluded from search" basically the same as a tombstone,
 just with extra steps?**
@@ -419,4 +427,44 @@ turn `/delete-request` into an actual delete, because `/delete-request` never
 calls `db_delete` under any input. That's a structural guarantee, not an
 access-control one.
 
+## 11. Compaction: how a tombstone becomes physical erasure
 
+§§5–6 establish that a network request can only ever reach `pending.bin`,
+and that only a local, confirmed `process-deletes` (or `origin delete`) run
+can flip a record's `is_deleted` flag. That flag flip alone leaves the
+record's id, vector, and metadata sitting untouched in `data.db` —
+recoverable, in principle, by anyone who can read the raw file. Compaction
+is the step that closes that gap: it's what turns "flagged as deleted" into
+"the bytes are actually gone."
+
+**What it does.** After a confirmed batch of deletions (§6) or a scheduled
+auto-expiry run (§8), the table's data file is rewritten from scratch,
+keeping only the records that survived. Every record tombstoned in that
+batch is left out of the rewrite entirely — not moved, not marked, simply
+never copied into the new file. The old file is atomically replaced by the
+new one (`rename()` over the original path), so a crash mid-rewrite leaves
+the original file intact rather than half-written.
+
+**Why it runs once per batch, not once per id.** A full-file rewrite is an
+O(n) pass over every surviving record, so if it ran per id, deleting 500
+records out of a 1,000,000-row table would mean 500 full-table rewrites.
+Instead, `process-deletes` and the auto-expiry path each tombstone every id
+in the batch first, and compact exactly once at the end — one rewrite,
+however many records were in that batch.
+
+**What it costs.** Compaction changes the on-disk byte offset of every
+record after the first deleted one, since everything downstream shifts to
+fill the gap. Any saved ANN index (`ivf_index.bin`) points at the old
+offsets, so it's invalidated as part of the same operation — the next
+`use_ann: true` search against that table gets the same "index not trained"
+response as a table that's never been trained, until `/train` runs again.
+This is a real, current cost of compacting: it's not automatic re-indexing,
+it's "the old index is now provably wrong, so it's removed rather than left
+around to silently return incorrect neighbors."
+
+**What compaction does *not* change about the security model.** Compaction
+only ever runs as the tail end of the same human-confirmed (§6) or
+admin-configured (§8) execution paths that already exist — there's no
+separate network-reachable "compact now" trigger, and no code path where a
+`/delete-request` alone can cause a rewrite. It's a consequence of an
+already-authorized deletion, not a new way to cause one.

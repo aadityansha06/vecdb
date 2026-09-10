@@ -385,10 +385,26 @@ static int handle_command(char *command, FlatDb_t **master_db) {
       printf("Usage: origin delete <id>\n");
       return TUI_CONTINUE;
     }
-
     if (db_delete(*master_db, id_to_delete) == 0) {
       printf("SUCCESS: Vector ID %" PRIu64 " marked as deleted.\n",
              id_to_delete);
+      char table_name[200] = {0};
+      sscanf((*master_db)->storage->file_name, "origin_data/%199[^/]/data.db",
+             table_name);
+      if (table_name[0] != '\0') {
+        if (db_compact(*master_db, table_name) == 0) {
+          printf("Compacted table '%s' -- deleted record's bytes removed from "
+                 "disk.\n",
+                 table_name);
+          char index_path[300];
+          snprintf(index_path, sizeof(index_path),
+                   "origin_data/%s/ivf_index.bin", table_name);
+          remove(index_path);
+        } else {
+          printf("Warning: delete succeeded, but compaction failed. Bytes "
+                 "remain on disk.\n");
+        }
+      }
     } else {
       printf("Error: Vector ID %" PRIu64
              " not found, already deleted, or disk write failed.\n",
@@ -446,8 +462,24 @@ static int handle_command(char *command, FlatDb_t **master_db) {
           success_count++;
         }
       }
-
+      
+    if (success_count > 0) {
+        FlatDb_t *compact_db = db_open(db_name);
+        if (compact_db != NULL) {
+          if (db_compact(compact_db, db_name) == 0) {
+            printf("Compacted table '%s' -- %" PRIu64 " tombstoned record(s) removed from disk.\n", db_name, success_count);
+            char index_path[300];
+            snprintf(index_path, sizeof(index_path), "origin_data/%s/ivf_index.bin", db_name);
+            remove(index_path);
+          } else {
+            printf("Warning: %" PRIu64 " deletion(s) succeeded, but compaction failed.\n", success_count);
+          }
+          db_close(compact_db);
+        }
+      }
       db_close(temp_db);
+
+
       clear_pending_deletes(db_name);
 
       printf("SUCCESS: Executed %" PRIu64 " actual deletions. (%" PRIu64

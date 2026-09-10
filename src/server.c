@@ -4,21 +4,23 @@
  * See the LICENSE file in the project root for full terms.
  */
 #define _GNU_SOURCE
-
 #include "../include/server.h"
 #include "../include/pending-delete.h"
 #include "../include/storage.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/epoll.h>
+#include <sys/resource.h>
 #include <unistd.h>
+
 #define MAX_TOP_K 10000
-#define THREAD_POOL_SIZE 128
 #define QUEUE_SIZE 512
 #define MAX_OPEN_TABLES 32
-int client_queue[QUEUE_SIZE];
-int queue_front = 0;
-int queue_rear = 0;
-int queue_count = 0;
+#define MAX_EVENTS 1024
+
 
 typedef struct {
   uint64_t id;
@@ -40,17 +42,17 @@ typedef struct {
   pthread_mutex_t disk_write_lock;
 } open_table_t;
 
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 static pthread_rwlock_t index_lock = PTHREAD_RWLOCK_INITIALIZER;
 static pthread_mutex_t pending_delete_lock = PTHREAD_MUTEX_INITIALIZER;
 static open_table_t open_tables[MAX_OPEN_TABLES];
 static int open_table_count = 0;
 static pthread_mutex_t open_tables_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void handel_client(server_data_t *server);
+static void handel_client(server_data_t *server, char *header_buffer,
+                          char *http_body);
 static void send_error(server_data_t *server, Client_error err_code,
                        const char *details);
+static int send_all(int fd, const char *buf, size_t len);
 
 static open_table_t *get_or_open_table(const char *db_name) {
   pthread_mutex_lock(&open_tables_lock);
@@ -194,45 +196,259 @@ static void *sync_worker(void *arg) {
         t->pending_delete_dirty = false;
       }
       pthread_mutex_unlock(&t->pending_dirty_lock);
+
       pthread_rwlock_wrlock(&t->lock);
-      check_and_run_auto_delete(t->db, t->name);
+      int compacted = check_and_run_auto_delete(t->db, t->name);
       pthread_rwlock_unlock(&t->lock);
+
+      if (compacted > 0) {
+        char index_path[300];
+        snprintf(index_path, sizeof(index_path),
+                 "origin_data/%s/ivf_index.bin", t->name);
+        pthread_rwlock_wrlock(&index_lock);
+        remove(index_path);
+        pthread_rwlock_unlock(&index_lock);
+      }
     }
     pthread_mutex_unlock(&open_tables_lock);
   }
   return NULL;
 }
 
-static void *worker_loop(void *arg) {
-  (void)arg;
 
-  while (1) {
-    int clientfd = -1;
 
-    pthread_mutex_lock(&queue_mutex);
+typedef enum { CONN_READING_HEADERS, CONN_READING_BODY, CONN_DONE } conn_phase_t;
 
-    while (queue_count == 0) {
-      pthread_cond_wait(&queue_cond, &queue_mutex);
+typedef struct {
+  int fd;
+  conn_phase_t phase;
+  char header_buffer[4096];
+  int header_length;
+  int content_length;
+  char *http_body;
+  int body_bytes_read;
+} conn_state_t;
+
+static int g_epoll_fd = -1;
+
+
+static int compute_epoll_thread_count(void) {
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  if (n < 4)
+    n = 4;
+  if (n > 32)
+    n = 32;
+  return (int)n;
+}
+
+static void set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags != -1)
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+
+static void raise_fd_limit(void) {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+    return;
+
+  rlim_t previous = rl.rlim_cur;
+  rl.rlim_cur = rl.rlim_max;
+
+  if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+    printf("Warning: could not raise open-file limit (soft=%llu hard=%llu). "
+           "For 100k+ connections, raise 'ulimit -n' (or LimitNOFILE= in "
+           "your systemd unit) before starting the server.\n",
+           (unsigned long long)previous, (unsigned long long)rl.rlim_max);
+    return;
+  }
+
+  printf("Open-file limit raised from %llu to %llu.\n",
+         (unsigned long long)previous, (unsigned long long)rl.rlim_cur);
+
+  if (rl.rlim_cur < 100000) {
+    printf("Warning: open-file limit is %llu, below 100000. The kernel's "
+           "hard limit itself needs raising externally to actually reach "
+           "100k concurrent connections.\n",
+           (unsigned long long)rl.rlim_cur);
+  }
+}
+
+static void close_conn(conn_state_t *conn) {
+  if (conn->http_body)
+    free(conn->http_body);
+  close(conn->fd);
+  free(conn);
+}
+
+static void rearm(conn_state_t *conn) {
+  struct epoll_event ev;
+  ev.events = EPOLLIN | EPOLLONESHOT;
+  ev.data.ptr = conn;
+  if (epoll_ctl(g_epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev) != 0) {
+    close_conn(conn);
+  }
+}
+
+
+static void handle_conn_event(conn_state_t *conn) {
+  for (;;) {
+    char *dest;
+    int dest_cap;
+
+    if (conn->phase == CONN_READING_HEADERS) {
+      dest = conn->header_buffer + conn->header_length;
+      dest_cap = (int)sizeof(conn->header_buffer) - 1 - conn->header_length;
+      if (dest_cap <= 0) {
+       
+        close_conn(conn);
+        return;
+      }
+    } else {
+      dest = conn->http_body + conn->body_bytes_read;
+      dest_cap = conn->content_length - conn->body_bytes_read;
     }
 
-    clientfd = client_queue[queue_front];
-    queue_front = (queue_front + 1) % QUEUE_SIZE;
-    queue_count--;
+    int n = recv(conn->fd, dest, dest_cap, 0);
 
-    pthread_mutex_unlock(&queue_mutex);
+    if (n == 0) {
+      close_conn(conn);
+      return;
+    }
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        rearm(conn);
+        return;
+      }
+      close_conn(conn);
+    }
 
-    if (clientfd >= 0) {
-      server_data_t local_server;
-      local_server.clientfd = clientfd;
+    if (conn->phase == CONN_READING_HEADERS) {
+      conn->header_length += n;
+      conn->header_buffer[conn->header_length] = '\0';
 
-      handel_client(&local_server);
+      char *body_start = strstr(conn->header_buffer, "\r\n\r\n");
+      if (body_start == NULL)
+        continue; 
+
+      int content_length = 0;
+      char *cl_ptr = strcasestr(conn->header_buffer, "Content-Length:");
+      if (cl_ptr) {
+        cl_ptr += strlen("Content-Length:");
+        content_length = atoi(cl_ptr);
+      }
+
+      if (content_length == 0 || content_length > 10485760) {
+        server_data_t s;
+        s.clientfd = conn->fd;
+        send_error(&s, INVALID_PARAMETER,
+                   "Missing or excessive Content-Length header.");
+        free(conn);
+        return;
+      }
+
+      conn->http_body = calloc(content_length + 1, 1);
+      if (conn->http_body == NULL) {
+        server_data_t s;
+        s.clientfd = conn->fd;
+        send_error(&s, INTERNAL_ERROR,
+                   "Out of memory allocating request body.");
+        free(conn);
+        return;
+      }
+      conn->content_length = content_length;
+
+      int headers_size = (int)(body_start - conn->header_buffer) + 4;
+      int leftover = conn->header_length - headers_size;
+      if (leftover > 0) {
+        int take = leftover > content_length ? content_length : leftover;
+        memcpy(conn->http_body, body_start + 4, take);
+        conn->body_bytes_read = take;
+      }
+
+      conn->phase = CONN_READING_BODY;
+
+      if (conn->body_bytes_read >= conn->content_length) {
+        conn->phase = CONN_DONE;
+        break;
+      }
+      continue;
+
+    } else { /* CONN_READING_BODY */
+      conn->body_bytes_read += n;
+      if (conn->body_bytes_read >= conn->content_length) {
+        conn->phase = CONN_DONE;
+        break;
+      }
+      continue;
+    }
+  }
+
+  
+  server_data_t server;
+  server.clientfd = conn->fd;
+  handel_client(&server, conn->header_buffer, conn->http_body);
+  free(conn);
+}
+
+static void *epoll_worker_loop(void *arg) {
+  (void)arg;
+  struct epoll_event events[MAX_EVENTS];
+  for (;;) {
+    int n = epoll_wait(g_epoll_fd, events, MAX_EVENTS, -1);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      continue;
+    }
+    for (int i = 0; i < n; i++) {
+      conn_state_t *conn = (conn_state_t *)events[i].data.ptr;
+      if (conn != NULL)
+        handle_conn_event(conn);
+    }
+  }
+  return NULL;
+}
+
+typedef struct {
+  int listen_fd;
+} acceptor_arg_t;
+
+static void *acceptor_loop(void *arg) {
+  int listen_fd = ((acceptor_arg_t *)arg)->listen_fd;
+  struct sockaddr_in clientadrr;
+  socklen_t client_len = sizeof(clientadrr);
+
+  for (;;) {
+    int new_clientfd =
+        accept(listen_fd, (struct sockaddr *)&clientadrr, &client_len);
+    if (new_clientfd < 0)
+      continue;
+
+    set_nonblocking(new_clientfd);
+
+    conn_state_t *conn = (conn_state_t *)calloc(1, sizeof(conn_state_t));
+    if (conn == NULL) {
+      close(new_clientfd);
+      continue;
+    }
+    conn->fd = new_clientfd;
+    conn->phase = CONN_READING_HEADERS;
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLONESHOT;
+    ev.data.ptr = conn;
+    if (epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, new_clientfd, &ev) != 0) {
+      close(new_clientfd);
+      free(conn);
     }
   }
   return NULL;
 }
 
 int server_init(int PORT) {
-  struct sockaddr_in serveadrr, clientadrr;
+  struct sockaddr_in serveadrr;
 
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
@@ -254,118 +470,75 @@ int server_init(int PORT) {
     exit(1);
   }
 
-  if (listen(sockfd, 128) < 0) {
+  if (listen(sockfd, 100000) < 0) {
     printf("Listen failed ");
     close(sockfd);
     exit(1);
   }
 
-  pthread_t thread_pool[THREAD_POOL_SIZE];
-  for (int i = 0; i < THREAD_POOL_SIZE; i++) {
-    pthread_create(&thread_pool[i], NULL, worker_loop, NULL);
-    pthread_detach(thread_pool[i]);
+  raise_fd_limit();
+
+  g_epoll_fd = epoll_create1(0);
+  if (g_epoll_fd == -1) {
+    printf("Failed to create epoll file descriptor\n");
+    exit(1);
   }
+
+  static acceptor_arg_t accept_arg;
+  accept_arg.listen_fd = sockfd;
+  pthread_t acceptor_thread;
+  pthread_create(&acceptor_thread, NULL, acceptor_loop, &accept_arg);
+  pthread_detach(acceptor_thread);
+
+  int epoll_thread_count = compute_epoll_thread_count();
+  pthread_t *epoll_threads =
+      malloc(sizeof(pthread_t) * (size_t)epoll_thread_count);
+  for (int i = 0; i < epoll_thread_count; i++) {
+    pthread_create(&epoll_threads[i], NULL, epoll_worker_loop, NULL);
+    pthread_detach(epoll_threads[i]);
+  }
+
   pthread_t sync_thread;
   pthread_create(&sync_thread, NULL, sync_worker, NULL);
   pthread_detach(sync_thread);
-  printf("\nOriginDB Thread Pool listening on Port %d...\n", PORT);
-  socklen_t client_len = sizeof(clientadrr);
 
-  while (1) {
-    int new_clientfd =
-        accept(sockfd, (struct sockaddr *)&clientadrr, &client_len);
-    if (new_clientfd < 0) {
-      continue;
-    }
+  printf("\nOriginDB epoll event loop listening on port %d (%d worker "
+         "thread(s), accept queue depth 100000)...\n",
+         PORT, epoll_thread_count);
 
-    pthread_mutex_lock(&queue_mutex);
 
-    if (queue_count == QUEUE_SIZE) {
-      pthread_mutex_unlock(&queue_mutex);
-      close(new_clientfd);
-      printf("\nServer overloaded, dropping connection.");
-    } else {
-      client_queue[queue_rear] = new_clientfd;
-      queue_rear = (queue_rear + 1) % QUEUE_SIZE;
-      queue_count++;
-
-      pthread_cond_signal(&queue_cond);
-      pthread_mutex_unlock(&queue_mutex);
-    }
+  for (;;) {
+    pause();
   }
 
   return 1;
 }
 
-static void handel_client(server_data_t *server) {
-  char header_buffer[4096] = {0};
-  int header_length = 0;
-  char *body_start = NULL;
 
-  while (header_length < (int)sizeof(header_buffer) - 1) {
-    int bytes = recv(server->clientfd, header_buffer + header_length, 1, 0);
-    if (bytes <= 0) {
-      close(server->clientfd);
-      return;
+static int send_all(int fd, const char *buf, size_t len) {
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = send(fd, buf + sent, len - sent, 0);
+    if (n > 0) {
+      sent += (size_t)n;
+      continue;
     }
-    header_length += bytes;
-    header_buffer[header_length] = '\0';
-
-    body_start = strstr(header_buffer, "\r\n\r\n");
-    if (body_start != NULL)
-      break;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct pollfd pfd;
+      pfd.fd = fd;
+      pfd.events = POLLOUT;
+      poll(&pfd, 1, 5000);
+      continue;
+    }
+    return -1;
   }
-
-  if (body_start == NULL) {
-    close(server->clientfd);
-    return;
-  }
-
-  int content_length = 0;
- char *cl_ptr = strcasestr(header_buffer, "Content-Length:");
-if (cl_ptr) {
-    cl_ptr += strlen("Content-Length:");
-    content_length = atoi(cl_ptr);
+  return 0;
 }
 
-  /* @Guardrail: 10MB limit to prevent memory exhaustion attacks
-   */
-  if (content_length == 0 || content_length > 10485760) {
-    send_error(server, INVALID_PARAMETER,
-               "Missing or excessive Content-Length header.");
-    return;
-  }
 
-  char *http_body = calloc(content_length + 1, 1);
-  if (http_body == NULL) {
-    send_error(server, INTERNAL_ERROR,
-               "Out of memory allocating request body.");
-    return;
-  }
 
-  int headers_size = (body_start - header_buffer) + 4;
-  int leftover_body_bytes = header_length - headers_size;
-  int body_bytes_read = 0;
-
-  if (leftover_body_bytes > 0) {
-    memcpy(http_body, body_start + 4, leftover_body_bytes);
-    body_bytes_read += leftover_body_bytes;
-  }
-
-  while (body_bytes_read < content_length) {
-    int bytes = recv(server->clientfd, http_body + body_bytes_read,
-                     content_length - body_bytes_read, 0);
-    if (bytes <= 0)
-      break;
-    body_bytes_read += bytes;
-  }
-
-  /*  @Route function
-   *  TODO: isolate receive/header_buffer() from handel_client
-   *  will do when free
-   *
-   */
-
+static void handel_client(server_data_t *server, char *header_buffer,
+                          char *http_body) {
   // Search Route
   if (strstr(header_buffer, "POST /search") != NULL) {
     search_req_t *req = NULL;
@@ -460,7 +633,7 @@ if (cl_ptr) {
                "%s",
                strlen(json_payload), json_payload);
 
-      send(server->clientfd, http_response, strlen(http_response), 0);
+      send_all(server->clientfd, http_response, strlen(http_response));
     } else {
       send_error(server, INTERNAL_ERROR, "Failed to serialize search results.");
     }
@@ -564,7 +737,7 @@ if (cl_ptr) {
              "%s",
              strlen(json_body), json_body);
 
-    send(server->clientfd, response, strlen(response), 0);
+    send_all(server->clientfd, response, strlen(response));
 
   insert_cleanup:
     if (table)
@@ -610,7 +783,7 @@ if (cl_ptr) {
              "Connection: close\r\n\r\n%s",
              strlen(json_response), json_response);
 
-    send(server->clientfd, response, strlen(response), 0);
+    send_all(server->clientfd, response, strlen(response));
 
   pending_cleanup:
     if (req)
@@ -678,7 +851,7 @@ if (cl_ptr) {
                "%s",
                strlen(json_body), json_body);
 
-      send(server->clientfd, response, strlen(response), 0);
+      send_all(server->clientfd, response, strlen(response));
     }
 
   train_cleanup:
@@ -737,6 +910,6 @@ static void send_error(server_data_t *server, Client_error err_code,
            "%s",
            status_str, strlen(json_body), json_body);
 
-  send(server->clientfd, response, strlen(response), 0);
+  send_all(server->clientfd, response, strlen(response));
   close(server->clientfd);
 }

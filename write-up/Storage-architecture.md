@@ -16,4 +16,14 @@ I also made it so the build phase doesn't just run on its own. It only triggers 
 
 The real magic happens when you actually run a search. In C we use fseek() for reading specific data instead of the whole file. If someone wants to do an IVF search instead of brute forcing the whole dataset, the database doesn't even touch the main data file at first. It just opens the cluster metadata file, checks the query vector against the centroids, and figures out the top nprobe clusters. Since that metadata tells us the exact record IDs that belong to those specific clusters, it acts like a lookup table. We can then jump straight into the main data file and load only those specific vectors into RAM, completely ignoring the rest of the dataset. It lets me extract exactly what is needed without blowing up the memory, making the whole architecture incredibly fast.
 
+### A note on compaction
+
+Byte offsets aren't permanent. When a table's tombstoned records are
+compacted (see the Deferred Delete Architecture write-up, §11), `data.db`
+is rewritten and every surviving record's offset shifts. The persisted IVF
+index is invalidated in that same step for exactly this reason — an index
+built against old offsets would otherwise point ANN search at the wrong
+bytes. This is the one case where "jump straight to the byte offset" isn't
+safe without a fresh `/train`.
+
 Full writeup on Medium: [Storage Architecture Design for Targeted Disk Reads in ANN Vector Search in C](https://medium.com/@vermaadityansh/storage-architecture-design-for-targeted-disk-reads-in-ann-vector-search-7159e5b46453)

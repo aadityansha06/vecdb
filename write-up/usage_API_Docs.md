@@ -21,11 +21,10 @@ Start the engine:
 |---|---|
 | `origin init <name> <dimension> <capacity> <metric>` | Create a new table. `metric`: `0` = cosine, `1` = euclidean. Fails if the table already exists. Prints a one-time API key — save it. |
 | `origin open <name>` | Open an existing table in this session. Dimension and metric are read automatically from the table's own stored config — you don't (and can't) override them here. |
-| `origin insert <id> [metadata]` | Insert a vector into the open table. Prompts for the vector's floats afterward. `metadata` is a single word (no spaces). |
+| `origin insert <id> [metadata]` | Insert a vector into the currently open/initialized table. Prompts for the vector's floats afterward. `metadata` is a single word (no spaces). |
 | `origin search <top_k>` | Exact nearest-neighbor search against the open table. Prompts for the query vector's floats. |
-| `origin delete <id>` | **Admin-only, immediate.** Marks a record as deleted (tombstoned — the vector bytes stay on disk, only a flag flips) both in memory and on disk, right away. Use this for ad-hoc local cleanup. |
-
-| `origin process-deletes <table>` | **Admin-only, batch.** Executes every delete request currently queued for `<table>` by the network's `/delete-request` endpoint (see §2.4). Shows the number of pending records and asks for `y`/`n` confirmation before touching anything. Ids that don't correspond to a real record, or were already deleted, are silently skipped and reported as ignored in the summary. Clears the queue afterward. |
+| `origin delete <id>` | **Admin-only, immediate.** Marks a record as deleted (tombstones the flag in memory and on disk), then immediately compacts the table — rewriting `data.db` without that record's bytes, so the file actually shrinks. Any saved ANN index for the table is invalidated in the same step, since compaction changes every byte offset; run `/train` again before the next `use_ann: true` search. |
+| `origin process-deletes <table>` | **Admin-only, batch.** Executes every delete request currently queued for `<table>` by the network's `/delete-request` endpoint (see §2.4). Shows the number of pending records and asks for `y`/`n` confirmation before touching anything. Ids that don't correspond to a real record, or were already deleted, are silently skipped and reported as ignored in the summary. On confirmation, tombstones each valid id, then compacts the table once for the whole batch — physically removing the deleted records' bytes from `data.db` and shrinking the file — and invalidates any saved ANN index for the table. Clears the queue afterward. |
 | `origin set-auto-delete <table> <days_from_now>` | **Admin-only.** Schedules the table's pending-delete queue to execute automatically once the given number of days has passed — `0` means "due at the server's next check" (checked every ~2 seconds while the server is running). Calling this again before the scheduled time arrives simply replaces it, so you can push a run earlier or later at any time, e.g. reschedule from "today" to "tomorrow" by running it again with a new value. |
 | `origin auto-delete-status <table>` | **Admin-only.** Shows whether auto-delete is currently scheduled for `<table>`, and roughly how long until it fires. |
 | `origin cancel-auto-delete <table>` | **Admin-only.** Cancels a scheduled auto-delete for `<table>`. Manual `origin delete`/`origin process-deletes` continue to work regardless of whether a schedule is set. |
@@ -48,7 +47,7 @@ queue will sit there indefinitely until you process it by hand — there is no
 implicit timeout.
 <br>
 
-See[`Delete-architecture.md`](Delete-architecture.md) for the full reasoning — in
+See [`Delete-architecture.md`](Delete-architecture.md) for the full reasoning — in
 short, a leaked API key can queue delete requests, but can never cause an actual
 deletion on its own.
 
@@ -62,6 +61,7 @@ origin insert 1 Inception
 
 origin delete 1
 # -> SUCCESS: Vector ID 1 marked as deleted.
+# -> Compacted table 'movies' -- deleted record's bytes removed from disk.
 ```
 
 **Important — the server blocks the terminal.** `origin server <port>` runs the
@@ -142,6 +142,9 @@ for why this trade-off exists.
 - `max_iterations` is a hard cap on the clustering loop — training stops and
   returns whatever clusters it has once that many iterations pass, even on data
   that hasn't fully converged. Safe to point at untrusted or adversarial data.
+- If the table's data has recently been compacted (see §1), any previously
+  saved index was already removed as part of that compaction — `/train` here
+  is what rebuilds it against the new, post-compaction byte offsets.
 
 ### `POST /delete-request`
 ```json
@@ -222,7 +225,7 @@ export async function searchMovies(queryVector: number[]) {
 
 | Code | Meaning |
 |---|---|
-| `400` | Malformed JSON, missing fields, dimension mismatch, invalid `top_k`/`nprobe`/`k`, or ANN search requested before `/train` has run. |
+| `400` | Malformed JSON, missing fields, dimension mismatch, invalid `top_k`/`nprobe`/`k`, or ANN search requested before `/train` has run (including right after a compaction removed the previous index). |
 | `401` | Missing/invalid `Authorization` header, or the key doesn't match `db_name`. |
 | `404` | Table not initialized locally, or an unrecognized route. |
 | `500` | Allocation failure or unexpected disk write failure. |
@@ -242,15 +245,22 @@ export async function searchMovies(queryVector: number[]) {
   [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md) for real load-test
   numbers on what this looks like in practice, including where this boundary
   actually sits.
+- **This is a thread-per-connection model, not an event loop.** Each worker
+  thread blocks on `recv()` for exactly one client at a time, end to end, until
+  that request is fully handled. There's no `epoll` (or `kqueue`/IOCP) anywhere
+  in the accept path — see
+  [`originDb-concurrency.md`](originDb-concurrency.md#4-why-no-epoll-yet)
+  for what that trade-off actually costs and when it would start to matter.
 - **Concurrency correctness:** each table is opened once and kept in memory,
   shared across every request against it, rather than reloaded from disk per
   request — reads use `pread()` against a memory-mapped copy of the data file, so
   concurrent searches can't race on a shared file position. A per-table
-  read/write lock guards in-memory mutations (insert merges), a separate lock
-  guards the durable on-disk write, and a read/write lock guards the IVF index
-  file (`/train` takes the write side, ANN `/search` takes the read side).
-  Concurrent `/insert`, `/search`, and `/train` calls — including against the
-  same table — are safe to fire in parallel.
+  read/write lock guards in-memory mutations (insert merges and compaction), a
+  separate lock guards the durable on-disk write, and a read/write lock guards
+  the IVF index file (`/train` and index invalidation after compaction take the
+  write side, ANN `/search` takes the read side). Concurrent `/insert`,
+  `/search`, and `/train` calls — including against the same table — are safe
+  to fire in parallel.
 - Keep `ORIGINDB_URL` and per-table API keys in your backend's environment/secrets,
   never in client-side code — the API key is the only thing standing between a
   caller and your table's data.
@@ -262,9 +272,19 @@ export async function searchMovies(queryVector: number[]) {
   ever writes a real deletion to disk. Plan your cleanup workflow around running
   that command periodically rather than expecting a *permanent, on-disk* deletion
   to happen automatically — see [`Delete-architecture.md`](Delete-architecture.md).
-- **Deletes are tombstones, not physical erasure.** Deleted vectors' bytes remain
-  on disk; only a flag flips. There is currently no compaction step to reclaim
-  space or shrink the file.
+- **Deletes are tombstoned, then compacted — not left as permanent tombstones.**
+  `origin delete` and `origin process-deletes` flip the `is_deleted` flag first,
+  then immediately rewrite `data.db` without those records: the bytes are
+  physically removed and the file shrinks. This is a full-file rewrite, not an
+  incremental reclaim, so on a very large table a single delete/process-deletes
+  call costs an O(n) pass over the whole file, not just the deleted records.
+  Auto-delete compacts once per scheduled run, not once per record.
+- **Compaction invalidates the saved ANN index.** Compaction changes every
+  surviving record's on-disk byte offset, so a previously trained
+  `ivf_index.bin` for that table is removed as part of the same operation.
+  `use_ann: true` searches will get a `400` ("Index not trained") until
+  `/train` is run again for that table — expected, not a bug, if you've just
+  deleted or auto-deleted records.
 - **Inserts and deletes have a short visibility delay (~2 seconds), by design.**
   Writes are durable immediately; the in-memory table used by search picks them
   up on a short background cycle rather than instantly. See
@@ -279,6 +299,9 @@ export async function searchMovies(queryVector: number[]) {
   around 1000 concurrent becomes less predictable (still never crashes, but
   latency or rejection rates rise). See
   [`Deployment-and-Capacity.md`](Deployment-and-Capacity.md#4-load-test-results)
-  for the full numbers.
+  for the full numbers. This ceiling is a direct consequence of the
+  thread-per-connection model — see
+  [`originDb-concurrency.md`](originDb-concurrency.md#4-why-no-epoll-yet) for
+  what would change with an `epoll`-based accept loop instead.
 - **Load testing so far covers `/search` only.** `/insert` and `/train` haven't
   been put through the same concurrency sweep yet.

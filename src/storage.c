@@ -373,3 +373,140 @@ int storage_remap(storage_t *storage) {
   }
   return 0;
 }
+
+
+int storage_compact(storage_t *storage, Record_t **records_ptr,
+                    uint64_t *count, uint64_t dimension) {
+  if (storage == NULL || records_ptr == NULL || count == NULL)
+    return -1;
+
+  Record_t *records = *records_ptr;
+  char tmp_path[600];
+  snprintf(tmp_path, sizeof(tmp_path), "%s.compact.tmp", storage->file_name);
+
+  FILE *out = fopen(tmp_path, "w+b");
+  if (out == NULL) return -1;
+
+  uint64_t buf_cap = (*count > 0) ? *count : 1;
+  Record_t *new_records = (Record_t *)malloc(sizeof(Record_t) * buf_cap);
+  uint64_t *new_offsets = (uint64_t *)malloc(sizeof(uint64_t) * buf_cap);
+  bool *was_mmap = (bool *)malloc(sizeof(bool) * buf_cap);
+
+  /* Pointers to free ONLY after compaction succeeds */
+  void **to_free_meta = (void **)malloc(sizeof(void *) * buf_cap);
+  void **to_free_vec = (void **)malloc(sizeof(void *) * buf_cap);
+
+  if (!new_records || !new_offsets || !was_mmap || !to_free_meta || !to_free_vec) {
+    fclose(out);
+    remove(tmp_path);
+    free(new_records); free(new_offsets); free(was_mmap);
+    free(to_free_meta); free(to_free_vec);
+    return -1;
+  }
+
+  uint64_t new_count = 0;
+  uint64_t to_free_count = 0;
+  int failed = 0;
+
+  for (uint64_t i = 0; i < *count; i++) {
+    if (records[i].is_deleted) {
+      to_free_meta[to_free_count] = records[i].metadata;
+      to_free_vec[to_free_count] = records[i].is_mmap ? NULL : records[i].vector;
+      to_free_count++;
+      continue;
+    }
+
+    uint64_t new_offset = (uint64_t)ftell(out);
+    if (fwrite(&records[i].id, sizeof(uint64_t), 1, out) != 1) { failed = 1; break; }
+    if (fwrite(&records[i].is_deleted, sizeof(bool), 1, out) != 1) { failed = 1; break; }
+    if (fwrite(records[i].vector, sizeof(float), dimension, out) != dimension) { failed = 1; break; }
+    
+    size_t len = records[i].metadata ? strlen(records[i].metadata) : 0;
+    if (fwrite(&len, sizeof(size_t), 1, out) != 1) { failed = 1; break; }
+    if (len > 0 && fwrite(records[i].metadata, sizeof(char), len, out) != len) { failed = 1; break; }
+    
+    new_records[new_count] = records[i];
+    new_offsets[new_count] = new_offset;
+    was_mmap[new_count] = records[i].is_mmap;
+    new_count++;
+  }
+
+  if (failed || fflush(out) != 0) {
+    fclose(out);
+    remove(tmp_path);
+    free(new_records); free(new_offsets); free(was_mmap);
+    free(to_free_meta); free(to_free_vec);
+    return -1; /* Original array remains 100% valid */
+  }
+
+  fsync(fileno(out));
+  fclose(out);
+
+  if (storage->mmap_data && storage->mmap_data != MAP_FAILED) {
+    munmap(storage->mmap_data, storage->file_size);
+    storage->mmap_data = NULL;
+  }
+
+  if (storage->fp != NULL) {
+    fclose(storage->fp);
+    storage->fp = NULL;
+  }
+
+  if (rename(tmp_path, storage->file_name) != 0) {
+    perror("Fatal Error: Failed to swap compacted file");
+    storage->fp = fopen(storage->file_name, "r+b");
+    if (storage->fp != NULL && storage->file_size > 0) {
+      storage->mmap_data = mmap(NULL, storage->file_size, PROT_READ,
+                               MAP_SHARED, fileno(storage->fp), 0);
+      if (storage->mmap_data == MAP_FAILED) storage->mmap_data = NULL;
+    }
+    free(new_records); free(new_offsets); free(was_mmap);
+    free(to_free_meta); free(to_free_vec);
+    return -1;
+  }
+
+  storage->fp = fopen(storage->file_name, "r+b");
+  if (storage->fp == NULL) {
+    free(new_records); free(new_offsets); free(was_mmap);
+    free(to_free_meta); free(to_free_vec);
+    return -1;
+  }
+
+  fseek(storage->fp, 0, SEEK_END);
+  long sz = ftell(storage->fp);
+  storage->file_size = (sz > 0) ? (size_t)sz : 0;
+
+  if (storage->file_size > 0) {
+    storage->mmap_data = mmap(NULL, storage->file_size, PROT_READ, MAP_SHARED,
+                              fileno(storage->fp), 0);
+    if (storage->mmap_data == MAP_FAILED) storage->mmap_data = NULL;
+  }
+
+  for (uint64_t i = 0; i < new_count; i++) {
+    new_records[i].byte_offset = new_offsets[i];
+    if (was_mmap[i] && storage->mmap_data != NULL) {
+      uint8_t *ptr = (uint8_t *)storage->mmap_data + new_offsets[i];
+      ptr += sizeof(uint64_t) + sizeof(bool);
+      new_records[i].vector = (float *)ptr;
+      new_records[i].is_mmap = true;
+    } else {
+      new_records[i].is_mmap = false;
+    }
+  }
+
+  for (uint64_t i = 0; i < to_free_count; i++) {
+    if (to_free_meta[i]) free(to_free_meta[i]);
+    if (to_free_vec[i]) free(to_free_vec[i]);
+  }
+
+  free(records);
+  free(new_offsets);
+  free(was_mmap);
+  free(to_free_meta);
+  free(to_free_vec);
+
+  *records_ptr = new_records;
+  *count = new_count;
+  return 0;
+}
+

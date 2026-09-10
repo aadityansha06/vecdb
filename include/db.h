@@ -1,9 +1,8 @@
 /*
-* Copyright (c) 2026 Aadityansha Verma. All rights reserved.
-* This file is licensed under the Business Source License 1.1.
-* See the LICENSE file in the project root for full terms.
-*/
-
+ * Copyright (c) 2026 Aadityansha Verma. All rights reserved.
+ * This file is licensed under the Business Source License 1.1.
+ * See the LICENSE file in the project root for full terms.
+ */
 
 #ifndef DB_H
 #define DB_H
@@ -47,8 +46,8 @@ typedef struct {
   Distance_func calculate_distance;
   storage_t *storage;
 
-  uint64_t *pending_deletes; 
-    uint64_t pending_count;
+  uint64_t *pending_deletes;
+  uint64_t pending_count;
 } FlatDb_t; // Master struct
 
 typedef struct search {
@@ -96,9 +95,7 @@ FlatDb_t *db_open(const char *db_name);
 bool validate_db_name(const char *name);
 void db_close(FlatDb_t *db);
 
-
 int db_delete(FlatDb_t *db, uint64_t id);
-
 
 /* Checks whether db_name's auto-delete schedule has arrived; if so, executes
  * every currently queued delete against `db`, clears the queue, and clears
@@ -106,10 +103,6 @@ int db_delete(FlatDb_t *db, uint64_t id);
  * Returns the number of records deleted (0 = nothing ran), or -1 on error. */
 int check_and_run_auto_delete(FlatDb_t *db, const char *db_name);
 
-
-
-
-
-
+int db_compact(FlatDb_t *db, const char *db_name);
 
 #endif
