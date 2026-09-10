@@ -646,8 +646,13 @@ static void handel_client(server_data_t *server, char *header_buffer,
       pthread_rwlock_unlock(&table->lock);
     if (json_payload)
       free(json_payload);
-    if (results)
-      free(results);
+     if (results) {
+    for (uint64_t i = 0; i < req->top_k; i++) {
+      if (results[i].metadata)
+        free(results[i].metadata);
+    }
+    free(results);
+  }
 
     if (req)
       free_search_request(req);
