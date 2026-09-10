@@ -322,6 +322,7 @@ static void handle_conn_event(conn_state_t *conn) {
         return;
       }
       close_conn(conn);
+         return;
     }
 
     if (conn->phase == CONN_READING_HEADERS) {
@@ -344,6 +345,7 @@ static void handle_conn_event(conn_state_t *conn) {
         s.clientfd = conn->fd;
         send_error(&s, INVALID_PARAMETER,
                    "Missing or excessive Content-Length header.");
+          close(conn->fd);
         free(conn);
         return;
       }
@@ -354,6 +356,7 @@ static void handle_conn_event(conn_state_t *conn) {
         s.clientfd = conn->fd;
         send_error(&s, INTERNAL_ERROR,
                    "Out of memory allocating request body.");
+          close(conn->fd);
         free(conn);
         return;
       }
@@ -876,6 +879,8 @@ static void handel_client(server_data_t *server, char *header_buffer,
   } else {
 
     send_error(server, WRONG_REQUEST, "Invalid API route.");
+        close(server->clientfd); 
+
   }
 }
 static void send_error(server_data_t *server, Client_error err_code,
@@ -911,5 +916,4 @@ static void send_error(server_data_t *server, Client_error err_code,
            status_str, strlen(json_body), json_body);
 
   send_all(server->clientfd, response, strlen(response));
-  close(server->clientfd);
 }
