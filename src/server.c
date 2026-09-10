@@ -15,7 +15,7 @@
 #include <sys/epoll.h>
 #include <sys/resource.h>
 #include <unistd.h>
-
+#include <float.h>
 #define MAX_TOP_K 10000
 #define QUEUE_SIZE 512
 #define MAX_OPEN_TABLES 32
@@ -594,6 +594,11 @@ static void handel_client(server_data_t *server, char *header_buffer,
                  "Out of memory allocating search results.");
       goto search_cleanup;
     }
+    for (uint64_t i = 0; i < req->top_k; i++) {
+    results[i].metadata = NULL;
+    results[i].id = 0;
+    results[i].calculated_distance = FLT_MAX;
+}
 
     if (req->use_ann) {
       uint64_t loaded_k;
