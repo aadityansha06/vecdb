@@ -18,39 +18,9 @@ out locally, by a human, on the server itself. Read the full design here:
 
 - [Usage-API-Doc](write-up/usage_API_Docs.md) — how to call the API once it's running.
 - [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md) — how to build and
-  run it, plus real load-test numbers (verified clean up to ~950 concurrent
+  run it, plus real load-test numbers (verified clean up to 1000 concurrent
   connections).
-
-
-
-## Where This Fits
-
-OriginDB is built around one trade-off: deletion requires a human, on
-purpose (see [Delete-architecture](write-up/Delete-architecture.md)). That
-makes it a good fit for systems that are **read-heavy, security-sensitive,
-and don't delete often** — and a poor fit for anything that deletes
-constantly as part of normal operation.
-
-**Good fit:**
-- A bank's transaction/document search — records get inserted and searched
-  constantly, almost never deleted, and a leaked key must never be able to
-  wipe history.
-- A government records or compliance archive — write-once-ish, read-heavy,
-  deletion is a rare, deliberate, audited event, not a routine action.
-- A song/media recommendation catalog — catalog entries are inserted in
-  batches and searched heavily; removing a track is infrequent and can wait
-  for a human to confirm.
-- An internal analytics/BI dataset — ingested periodically, queried often,
-  rarely if ever needs individual records removed on demand.
-
-**Poor fit (for now):**
-- A chat app, social feed, or anything where users routinely delete their
-  own content in real time — this design assumes deletion is the exception,
-  not a constant background operation.
-- Any system needing instant delete visibility with no review step — the
-  deferred-delete model is the point of this project, not a limitation to
-  route around.
-
+"The server's configuration supports up to 100,000 concurrent connections (file descriptor limits, accept queue depth). This has not been verified with a single-client load test, since one client machine is itself limited to roughly 28,000 simultaneous outbound connections by its local TCP port range (net.ipv4.ip_local_port_range) — testing genuine 100k concurrency would require a distributed load-generation setup across multiple client machines, a standard limitation of single-machine load testing at this scale."
 
 # Why this exists
 
@@ -76,7 +46,7 @@ be appreciated too.
 - **Pluggable Distance Metrics:** cosine and euclidean, selected per table via a function pointer router.
 - **Cached, Shared Tables:** each table is opened once and kept in memory across requests, rather than reloaded from disk per call, with inserts and pending deletes synced into the live table on a short background cycle.
 - **Auto-Growing Record Table:** in-memory record array doubles capacity on overflow instead of a fixed cap.
-- **TCP Server with JSON API:** POST /search, /insert, /train, /delete-request routes over raw sockets, parsed with cJSON, backed by a 128-thread worker pool. Load-tested clean up to ~950 concurrent connections — see [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md).
+- **TCP Server with JSON API:** POST /search, /insert, /train, /delete-request routes over an epoll-based event loop with HTTP keep-alive, parsed with cJSON. API keys and the trained IVF index are cached in memory rather than re-read from disk per request. Load-tested clean up to 1000 concurrent connections with zero failures — see [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md).
 - **API Key Auth:** per-table key generation and verification on server requests.
 - **Deferred Delete Queue:** deletions can be requested over the network but can only ever be executed locally, with an explicit human confirmation — a leaked API key can never delete data on its own.
 - **Interactive TUI + One-Shot CLI:** REPL for exploring a table, or run a single command directly from the shell.

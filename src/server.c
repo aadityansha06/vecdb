@@ -630,6 +630,7 @@ int server_init(int PORT) {
 
 static int send_all(int fd, const char *buf, size_t len) {
   size_t sent = 0;
+  uint64_t deadline = (uint64_t)time(NULL) + 10;
   while (sent < len) {
     ssize_t n = send(fd, buf + sent, len - sent, 0);
     if (n > 0) {
@@ -637,10 +638,12 @@ static int send_all(int fd, const char *buf, size_t len) {
       continue;
     }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      if ((uint64_t)time(NULL) >= deadline)
+        return -1;
       struct pollfd pfd;
       pfd.fd = fd;
       pfd.events = POLLOUT;
-      poll(&pfd, 1, 5000);
+      poll(&pfd, 1, 1000);
       continue;
     }
     return -1;
@@ -743,6 +746,11 @@ static void handel_client(server_data_t *server, char *header_buffer,
     }
 
     json_payload = serialize_search_results(results, req->top_k);
+
+    if (table) {
+      pthread_rwlock_unlock(&table->lock);
+      table = NULL;
+    }
 
     if (json_payload != NULL) {
       char http_response[4096];
@@ -848,6 +856,10 @@ static void handel_client(server_data_t *server, char *header_buffer,
         temp_rec.byte_offset;
     table->insert_queue_count++;
     pthread_mutex_unlock(&table->insert_queue_lock);
+
+    pthread_rwlock_unlock(&table->lock);
+    table = NULL;
+
     char response[1024];
     char json_body[] = "{\"status\": \"success\", \"message\": \"Vector "
                        "inserted successfully.\"}";
@@ -962,6 +974,12 @@ static void handel_client(server_data_t *server, char *header_buffer,
     }
 
     pthread_rwlock_unlock(&index_lock);
+
+    if (table) {
+      pthread_rwlock_unlock(&table->lock);
+      table = NULL;
+    }
+
     if (save_status < 0) {
       send_error(server, INTERNAL_ERROR,
                  "Failed to save trained index to disk.");
