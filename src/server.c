@@ -142,20 +142,22 @@ static void load_auth_cache(void) {
   while (fgets(line, sizeof(line), fp) && temp_count < MAX_AUTH_KEYS) {
     line[strcspn(line, "\r\n")] = '\0';
     char *colon = strchr(line, ':');
-  if (colon) {
-      *colon = '\0';       
+    if (colon) {
+      *colon = '\0';
       size_t name_len = strlen(line);
-      if (name_len > 64) name_len = 64;
-      
+      if (name_len > 64)
+        name_len = 64;
+
       size_t key_len = strlen(colon + 1);
-      if (key_len > 64) key_len = 64;
-      
+      if (key_len > 64)
+        key_len = 64;
+
       memcpy(temp_cache[temp_count].db_name, line, name_len);
       temp_cache[temp_count].db_name[name_len] = '\0';
-      
+
       memcpy(temp_cache[temp_count].api_key, colon + 1, key_len);
       temp_cache[temp_count].api_key[key_len] = '\0';
-      
+
       temp_count++;
     }
   }
@@ -445,7 +447,7 @@ static void handle_conn_event(conn_state_t *conn) {
         s.clientfd = conn->fd;
         send_error(&s, INTERNAL_ERROR,
                    "Out of memory allocating request body.");
-  close_conn(conn);
+        close_conn(conn);
 
         return;
       }
@@ -773,8 +775,6 @@ static void handel_client(server_data_t *server, char *header_buffer,
 
     if (req)
       free_search_request(req);
-    if (http_body)
-      free(http_body);
 
   } else if (strstr(header_buffer, "POST /insert") != NULL) {
     // insert_data();
@@ -869,9 +869,6 @@ static void handel_client(server_data_t *server, char *header_buffer,
     if (req)
       free_insert_request(req);
 
-    if (http_body)
-      free(http_body);
-
   } else if (strstr(header_buffer, "POST /delete-request") != NULL) {
 
     // @temp-delete
@@ -911,8 +908,6 @@ static void handel_client(server_data_t *server, char *header_buffer,
   pending_cleanup:
     if (req)
       free_delete_request(req);
-    if (http_body)
-      free(http_body);
     return;
   } else if (strstr(header_buffer, "POST /train") != NULL) {
 
@@ -1003,8 +998,7 @@ static void handel_client(server_data_t *server, char *header_buffer,
       free_train_request(req);
     if (table)
       pthread_rwlock_unlock(&table->lock);
-    if (http_body)
-      free(http_body);
+
   } else {
 
     send_error(server, WRONG_REQUEST, "Invalid API route.");
