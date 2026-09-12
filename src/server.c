@@ -3,24 +3,27 @@
  * This file is licensed under the Business Source License 1.1.
  * See the LICENSE file in the project root for full terms.
  */
+
 #define _GNU_SOURCE
 #include "../include/server.h"
 #include "../include/pending-delete.h"
 #include "../include/storage.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/epoll.h>
 #include <sys/resource.h>
 #include <unistd.h>
-#include <float.h>
 #define MAX_TOP_K 10000
 #define QUEUE_SIZE 512
 #define MAX_OPEN_TABLES 32
 #define MAX_EVENTS 1024
-
+#define MAX_AUTH_KEYS 128
+#define MAX_CONNECTIONS 100000
+static int g_epoll_fd = -1;
 
 typedef struct {
   uint64_t id;
@@ -40,8 +43,38 @@ typedef struct {
   uint64_t insert_queue_count;
   uint64_t insert_queue_capacity;
   pthread_mutex_t disk_write_lock;
+  cluster_t *ivf_index;
+  uint64_t ivf_k;
+  bool index_loaded;
 } open_table_t;
 
+typedef struct {
+  char db_name[65];
+  char api_key[65];
+} auth_entry_t;
+
+typedef enum {
+  CONN_READING_HEADERS,
+  CONN_READING_BODY,
+  CONN_DONE
+} conn_phase_t;
+
+typedef struct {
+  int fd;
+  conn_phase_t phase;
+  char header_buffer[4096];
+  int header_length;
+  int content_length;
+  char *http_body;
+  uint64_t last_active;
+  int body_bytes_read;
+} conn_state_t;
+
+static auth_entry_t auth_cache[MAX_AUTH_KEYS];
+static int auth_cache_count = 0;
+static pthread_rwlock_t auth_lock = PTHREAD_RWLOCK_INITIALIZER;
+static conn_state_t *active_connections[MAX_CONNECTIONS] = {0};
+static pthread_mutex_t conn_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t index_lock = PTHREAD_RWLOCK_INITIALIZER;
 static pthread_mutex_t pending_delete_lock = PTHREAD_MUTEX_INITIALIZER;
 static open_table_t open_tables[MAX_OPEN_TABLES];
@@ -90,29 +123,60 @@ static open_table_t *get_or_open_table(const char *db_name) {
   slot->insert_queue_count = 0;
 
   pthread_mutex_init(&slot->disk_write_lock, NULL);
-
+  slot->ivf_index = NULL;
+  slot->ivf_k = 0;
+  slot->index_loaded = false;
   pthread_mutex_unlock(&open_tables_lock);
   return slot;
 }
-static bool verify_api_key(const char *db_name, const char *provided_key) {
+
+static void load_auth_cache(void) {
   FILE *fp = fopen("origin_data/.auth_keys", "r");
   if (fp == NULL)
-    return false;
+    return;
+
+  auth_entry_t temp_cache[MAX_AUTH_KEYS];
+  int temp_count = 0;
   char line[256];
-  char expected_match[200];
 
-  snprintf(expected_match, sizeof(expected_match), "%s:%s", db_name,
-           provided_key);
-
-  while (fgets(line, sizeof(line), fp)) {
+  while (fgets(line, sizeof(line), fp) && temp_count < MAX_AUTH_KEYS) {
     line[strcspn(line, "\r\n")] = '\0';
-    if (strcmp(line, expected_match) == 0) {
-      fclose(fp);
-      return true;
+    char *colon = strchr(line, ':');
+  if (colon) {
+      *colon = '\0';       
+      size_t name_len = strlen(line);
+      if (name_len > 64) name_len = 64;
+      
+      size_t key_len = strlen(colon + 1);
+      if (key_len > 64) key_len = 64;
+      
+      memcpy(temp_cache[temp_count].db_name, line, name_len);
+      temp_cache[temp_count].db_name[name_len] = '\0';
+      
+      memcpy(temp_cache[temp_count].api_key, colon + 1, key_len);
+      temp_cache[temp_count].api_key[key_len] = '\0';
+      
+      temp_count++;
     }
   }
-
   fclose(fp);
+
+  pthread_rwlock_wrlock(&auth_lock);
+  memcpy(auth_cache, temp_cache, sizeof(auth_entry_t) * temp_count);
+  auth_cache_count = temp_count;
+  pthread_rwlock_unlock(&auth_lock);
+}
+
+static bool verify_api_key(const char *db_name, const char *provided_key) {
+  pthread_rwlock_rdlock(&auth_lock);
+  for (int i = 0; i < auth_cache_count; i++) {
+    if (strcmp(auth_cache[i].db_name, db_name) == 0) {
+      bool match = (strcmp(auth_cache[i].api_key, provided_key) == 0);
+      pthread_rwlock_unlock(&auth_lock);
+      return match;
+    }
+  }
+  pthread_rwlock_unlock(&auth_lock);
   return false;
 }
 
@@ -143,12 +207,49 @@ static void mark_table_pending_dirty(const char *db_name) {
   pthread_mutex_unlock(&open_tables_lock);
 }
 
+static void clear_cached_index(open_table_t *table) {
+  if (table->ivf_index) {
+    for (uint64_t i = 0; i < table->ivf_k; i++) {
+      if (table->ivf_index[i].centroid_vector)
+        free(table->ivf_index[i].centroid_vector);
+      if (table->ivf_index[i].byte_offsets)
+        free(table->ivf_index[i].byte_offsets);
+      if (table->ivf_index[i].record_index)
+        free(table->ivf_index[i].record_index);
+    }
+    free(table->ivf_index);
+    table->ivf_index = NULL;
+  }
+  table->ivf_k = 0;
+  table->index_loaded = false;
+}
+
 static void *sync_worker(void *arg) {
   (void)arg;
   while (1) {
     sleep(2);
+    load_auth_cache();
+    uint64_t now = (uint64_t)time(NULL);
+
+    pthread_mutex_lock(&conn_tracker_lock);
+
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+      conn_state_t *c = active_connections[i];
+      if (c != NULL && (now - c->last_active) > 300) {
+
+        epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, c->fd, NULL);
+        active_connections[i] = NULL;
+
+        if (c->http_body)
+          free(c->http_body);
+        close(c->fd);
+        free(c);
+      }
+    }
+    pthread_mutex_unlock(&conn_tracker_lock);
 
     pthread_mutex_lock(&open_tables_lock);
+
     for (int i = 0; i < open_table_count; i++) {
       open_table_t *t = &open_tables[i];
 
@@ -203,10 +304,11 @@ static void *sync_worker(void *arg) {
 
       if (compacted > 0) {
         char index_path[300];
-        snprintf(index_path, sizeof(index_path),
-                 "origin_data/%s/ivf_index.bin", t->name);
+        snprintf(index_path, sizeof(index_path), "origin_data/%s/ivf_index.bin",
+                 t->name);
         pthread_rwlock_wrlock(&index_lock);
         remove(index_path);
+        clear_cached_index(t);
         pthread_rwlock_unlock(&index_lock);
       }
     }
@@ -214,23 +316,6 @@ static void *sync_worker(void *arg) {
   }
   return NULL;
 }
-
-
-
-typedef enum { CONN_READING_HEADERS, CONN_READING_BODY, CONN_DONE } conn_phase_t;
-
-typedef struct {
-  int fd;
-  conn_phase_t phase;
-  char header_buffer[4096];
-  int header_length;
-  int content_length;
-  char *http_body;
-  int body_bytes_read;
-} conn_state_t;
-
-static int g_epoll_fd = -1;
-
 
 static int compute_epoll_thread_count(void) {
   long n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -246,7 +331,6 @@ static void set_nonblocking(int fd) {
   if (flags != -1)
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
-
 
 static void raise_fd_limit(void) {
   struct rlimit rl;
@@ -276,6 +360,12 @@ static void raise_fd_limit(void) {
 }
 
 static void close_conn(conn_state_t *conn) {
+  pthread_mutex_lock(&conn_tracker_lock);
+  if (conn->fd >= 0 && conn->fd < MAX_CONNECTIONS) {
+    active_connections[conn->fd] = NULL;
+  }
+  pthread_mutex_unlock(&conn_tracker_lock);
+
   if (conn->http_body)
     free(conn->http_body);
   close(conn->fd);
@@ -291,8 +381,8 @@ static void rearm(conn_state_t *conn) {
   }
 }
 
-
 static void handle_conn_event(conn_state_t *conn) {
+  conn->last_active = (uint64_t)time(NULL);
   for (;;) {
     char *dest;
     int dest_cap;
@@ -301,7 +391,7 @@ static void handle_conn_event(conn_state_t *conn) {
       dest = conn->header_buffer + conn->header_length;
       dest_cap = (int)sizeof(conn->header_buffer) - 1 - conn->header_length;
       if (dest_cap <= 0) {
-       
+
         close_conn(conn);
         return;
       }
@@ -322,7 +412,7 @@ static void handle_conn_event(conn_state_t *conn) {
         return;
       }
       close_conn(conn);
-         return;
+      return;
     }
 
     if (conn->phase == CONN_READING_HEADERS) {
@@ -331,7 +421,7 @@ static void handle_conn_event(conn_state_t *conn) {
 
       char *body_start = strstr(conn->header_buffer, "\r\n\r\n");
       if (body_start == NULL)
-        continue; 
+        continue;
 
       int content_length = 0;
       char *cl_ptr = strcasestr(conn->header_buffer, "Content-Length:");
@@ -345,8 +435,7 @@ static void handle_conn_event(conn_state_t *conn) {
         s.clientfd = conn->fd;
         send_error(&s, INVALID_PARAMETER,
                    "Missing or excessive Content-Length header.");
-          close(conn->fd);
-        free(conn);
+        close_conn(conn);
         return;
       }
 
@@ -356,8 +445,8 @@ static void handle_conn_event(conn_state_t *conn) {
         s.clientfd = conn->fd;
         send_error(&s, INTERNAL_ERROR,
                    "Out of memory allocating request body.");
-          close(conn->fd);
-        free(conn);
+  close_conn(conn);
+
         return;
       }
       conn->content_length = content_length;
@@ -388,11 +477,26 @@ static void handle_conn_event(conn_state_t *conn) {
     }
   }
 
-  
   server_data_t server;
   server.clientfd = conn->fd;
+
   handel_client(&server, conn->header_buffer, conn->http_body);
-  free(conn);
+
+  if (strcasestr(conn->header_buffer, "Connection: close") != NULL) {
+    close_conn(conn);
+  } else {
+    if (conn->http_body) {
+      free(conn->http_body);
+      conn->http_body = NULL;
+    }
+    conn->phase = CONN_READING_HEADERS;
+    conn->header_length = 0;
+    conn->body_bytes_read = 0;
+    conn->content_length = 0;
+    conn->header_buffer[0] = '\0';
+
+    rearm(conn);
+  }
 }
 
 static void *epoll_worker_loop(void *arg) {
@@ -438,13 +542,19 @@ static void *acceptor_loop(void *arg) {
     }
     conn->fd = new_clientfd;
     conn->phase = CONN_READING_HEADERS;
+    conn->last_active = (uint64_t)time(NULL);
+
+    pthread_mutex_lock(&conn_tracker_lock);
+    if (new_clientfd < MAX_CONNECTIONS) {
+      active_connections[new_clientfd] = conn;
+    }
+    pthread_mutex_unlock(&conn_tracker_lock);
 
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.ptr = conn;
     if (epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, new_clientfd, &ev) != 0) {
-      close(new_clientfd);
-      free(conn);
+      close_conn(conn);
     }
   }
   return NULL;
@@ -452,7 +562,7 @@ static void *acceptor_loop(void *arg) {
 
 int server_init(int PORT) {
   struct sockaddr_in serveadrr;
-
+  load_auth_cache();
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     printf("Socket failed ");
@@ -509,14 +619,12 @@ int server_init(int PORT) {
          "thread(s), accept queue depth 100000)...\n",
          PORT, epoll_thread_count);
 
-
   for (;;) {
     pause();
   }
 
   return 1;
 }
-
 
 static int send_all(int fd, const char *buf, size_t len) {
   size_t sent = 0;
@@ -537,8 +645,6 @@ static int send_all(int fd, const char *buf, size_t len) {
   }
   return 0;
 }
-
-
 
 static void handel_client(server_data_t *server, char *header_buffer,
                           char *http_body) {
@@ -595,33 +701,39 @@ static void handel_client(server_data_t *server, char *header_buffer,
       goto search_cleanup;
     }
     for (uint64_t i = 0; i < req->top_k; i++) {
-    results[i].metadata = NULL;
-    results[i].id = 0;
-    results[i].calculated_distance = FLT_MAX;
-}
+      results[i].metadata = NULL;
+      results[i].id = 0;
+      results[i].calculated_distance = FLT_MAX;
+    }
 
     if (req->use_ann) {
-      uint64_t loaded_k;
       pthread_rwlock_rdlock(&index_lock);
-      cluster_t *clusters =
-          load_ivf_index(req->db_name, &loaded_k, req->dimension);
-      pthread_rwlock_unlock(&index_lock);
 
-      if (clusters == NULL) {
+      if (!table->index_loaded) {
+        pthread_rwlock_unlock(&index_lock);
+        pthread_rwlock_wrlock(&index_lock);
+
+        if (!table->index_loaded) {
+          table->ivf_index =
+              load_ivf_index(req->db_name, &table->ivf_k, req->dimension);
+          table->index_loaded = true;
+        }
+
+        pthread_rwlock_unlock(&index_lock);
+        pthread_rwlock_rdlock(&index_lock);
+      }
+
+      if (table->ivf_index == NULL) {
+        pthread_rwlock_unlock(&index_lock);
         send_error(server, INVALID_PARAMETER,
                    "Index not trained. Call /train or use ENN.");
         goto search_cleanup;
       }
 
-      db_ann_search(db, req->query_vector, req->top_k, req->nprobe, clusters,
-                    loaded_k, results);
+      db_ann_search(db, req->query_vector, req->top_k, req->nprobe,
+                    table->ivf_index, table->ivf_k, results);
 
-      for (uint64_t i = 0; i < loaded_k; i++) {
-        free(clusters[i].centroid_vector);
-        free(clusters[i].byte_offsets);
-      }
-      free(clusters);
-
+      pthread_rwlock_unlock(&index_lock);
     } else {
       flat_search(db->records, db->count, req->dimension, req->query_vector,
                   req->top_k, db->calculate_distance, results,
@@ -636,7 +748,7 @@ static void handel_client(server_data_t *server, char *header_buffer,
                "HTTP/1.1 200 OK\r\n"
                "Content-Type: application/json\r\n"
                "Content-Length: %zu\r\n"
-               "Connection: close\r\n"
+               "Connection: keep-alive\r\n"
                "\r\n"
                "%s",
                strlen(json_payload), json_payload);
@@ -651,20 +763,19 @@ static void handel_client(server_data_t *server, char *header_buffer,
       pthread_rwlock_unlock(&table->lock);
     if (json_payload)
       free(json_payload);
-     if (results) {
-    for (uint64_t i = 0; i < req->top_k; i++) {
-      if (results[i].metadata)
-        free(results[i].metadata);
+    if (results) {
+      for (uint64_t i = 0; i < req->top_k; i++) {
+        if (results[i].metadata)
+          free(results[i].metadata);
+      }
+      free(results);
     }
-    free(results);
-  }
 
     if (req)
       free_search_request(req);
     if (http_body)
       free(http_body);
 
-    close(server->clientfd);
   } else if (strstr(header_buffer, "POST /insert") != NULL) {
     // insert_data();
     insert_req_t *req = NULL;
@@ -745,7 +856,7 @@ static void handel_client(server_data_t *server, char *header_buffer,
              "HTTP/1.1 200 OK\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
+             "Connection: keep-alive\r\n"
              "\r\n"
              "%s",
              strlen(json_body), json_body);
@@ -760,7 +871,6 @@ static void handel_client(server_data_t *server, char *header_buffer,
 
     if (http_body)
       free(http_body);
-    close(server->clientfd);
 
   } else if (strstr(header_buffer, "POST /delete-request") != NULL) {
 
@@ -793,7 +903,7 @@ static void handel_client(server_data_t *server, char *header_buffer,
              "HTTP/1.1 200 OK\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n"
-             "Connection: close\r\n\r\n%s",
+             "Connection: keep-alive\r\n\r\n%s",
              strlen(json_response), json_response);
 
     send_all(server->clientfd, response, strlen(response));
@@ -803,7 +913,6 @@ static void handel_client(server_data_t *server, char *header_buffer,
       free_delete_request(req);
     if (http_body)
       free(http_body);
-    close(server->clientfd);
     return;
   } else if (strstr(header_buffer, "POST /train") != NULL) {
 
@@ -846,6 +955,17 @@ static void handel_client(server_data_t *server, char *header_buffer,
     pthread_rwlock_wrlock(&index_lock);
     int save_status =
         save_ivf_index(req->db_name, trained_clusters, req->k, db->dimension);
+
+    if (save_status == 0) {
+      clear_cached_index(table);
+
+      table->ivf_index = trained_clusters;
+      table->ivf_k = req->k;
+      table->index_loaded = true;
+
+      trained_clusters = NULL;
+    }
+
     pthread_rwlock_unlock(&index_lock);
     if (save_status < 0) {
       send_error(server, INTERNAL_ERROR,
@@ -859,7 +979,7 @@ static void handel_client(server_data_t *server, char *header_buffer,
                "HTTP/1.1 200 OK\r\n"
                "Content-Type: application/json\r\n"
                "Content-Length: %zu\r\n"
-               "Connection: close\r\n"
+               "Connection: keep-alive\r\n"
                "\r\n"
                "%s",
                strlen(json_body), json_body);
@@ -885,12 +1005,10 @@ static void handel_client(server_data_t *server, char *header_buffer,
       pthread_rwlock_unlock(&table->lock);
     if (http_body)
       free(http_body);
-    close(server->clientfd);
   } else {
 
     send_error(server, WRONG_REQUEST, "Invalid API route.");
-        close(server->clientfd); 
-
+    close(server->clientfd);
   }
 }
 static void send_error(server_data_t *server, Client_error err_code,

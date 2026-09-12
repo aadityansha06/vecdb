@@ -1,0 +1,82 @@
+OriginDB epoll event loop listening on port 8000 (32 worker thread(s), accept queue depth 100000)...
+^C==7729== 
+==7729== Process terminating with default action of signal 2 (SIGINT)
+==7729==    at 0x49574F6: pause (pause.c:29)
+==7729==    by 0x10F974: server_init (in /root/vecdb/origin)
+==7729==    by 0x117FC8: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== HEAP SUMMARY:
+==7729==     in use at exit: 10,528 bytes in 36 blocks
+==7729==   total heap usage: 36 allocs, 0 frees, 10,528 bytes allocated
+==7729== 
+==7729== 256 bytes in 1 blocks are definitely lost in loss record 1 of 5
+==7729==    at 0x4846828: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==7729==    by 0x10F900: server_init (in /root/vecdb/origin)
+==7729==    by 0x117FC8: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== 272 bytes in 1 blocks are possibly lost in loss record 2 of 5
+==7729==    at 0x484D953: calloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==7729==    by 0x40145AB: calloc (rtld-malloc.h:44)
+==7729==    by 0x40145AB: allocate_dtv (dl-tls.c:370)
+==7729==    by 0x40145AB: _dl_allocate_tls (dl-tls.c:629)
+==7729==    by 0x48FA6F6: allocate_stack (allocatestack.c:429)
+==7729==    by 0x48FA6F6: pthread_create@@GLIBC_2.34 (pthread_create.c:655)
+==7729==    by 0x10F8BB: server_init (in /root/vecdb/origin)
+==7729==    by 0x117FC8: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== 272 bytes in 1 blocks are possibly lost in loss record 3 of 5
+==7729==    at 0x484D953: calloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==7729==    by 0x40145AB: calloc (rtld-malloc.h:44)
+==7729==    by 0x40145AB: allocate_dtv (dl-tls.c:370)
+==7729==    by 0x40145AB: _dl_allocate_tls (dl-tls.c:629)
+==7729==    by 0x48FA6F6: allocate_stack (allocatestack.c:429)
+==7729==    by 0x48FA6F6: pthread_create@@GLIBC_2.34 (pthread_create.c:655)
+==7729==    by 0x10F944: server_init (in /root/vecdb/origin)
+==7729==    by 0x117FC8: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== 1,024 bytes in 1 blocks are still reachable in loss record 4 of 5
+==7729==    at 0x4846828: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==7729==    by 0x48E2294: _IO_file_doallocate (filedoalloc.c:101)
+==7729==    by 0x48F2603: _IO_doallocbuf (genops.c:347)
+==7729==    by 0x48F006F: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:745)
+==7729==    by 0x48F0B8E: _IO_new_file_xsputn (fileops.c:1244)
+==7729==    by 0x48F0B8E: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1197)
+==7729==    by 0x48BDCC8: __printf_buffer_flush_to_file (printf_buffer_to_file.c:59)
+==7729==    by 0x48BDCC8: __printf_buffer_to_file_done (printf_buffer_to_file.c:120)
+==7729==    by 0x48C8742: __vfprintf_internal (vfprintf-internal.c:1545)
+==7729==    by 0x4994B3C: __printf_chk (printf_chk.c:33)
+==7729==    by 0x117FC1: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== 8,704 bytes in 32 blocks are possibly lost in loss record 5 of 5
+==7729==    at 0x484D953: calloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==7729==    by 0x40145AB: calloc (rtld-malloc.h:44)
+==7729==    by 0x40145AB: allocate_dtv (dl-tls.c:370)
+==7729==    by 0x40145AB: _dl_allocate_tls (dl-tls.c:629)
+==7729==    by 0x48FA6F6: allocate_stack (allocatestack.c:429)
+==7729==    by 0x48FA6F6: pthread_create@@GLIBC_2.34 (pthread_create.c:655)
+==7729==    by 0x10F91E: server_init (in /root/vecdb/origin)
+==7729==    by 0x117FC8: handle_command (in /root/vecdb/origin)
+==7729==    by 0x118E13: run_tui (in /root/vecdb/origin)
+==7729==    by 0x10ACCC: main (in /root/vecdb/origin)
+==7729== 
+==7729== LEAK SUMMARY:
+==7729==    definitely lost: 256 bytes in 1 blocks
+==7729==    indirectly lost: 0 bytes in 0 blocks
+==7729==      possibly lost: 9,248 bytes in 34 blocks
+==7729==    still reachable: 1,024 bytes in 1 blocks
+==7729==         suppressed: 0 bytes in 0 blocks
+==7729== 
+==7729== For lists of detected and suppressed errors, rerun with: -s
+==7729== ERROR SUMMARY: 4 errors from 4 contexts (suppressed: 0 from 0)
+
+
