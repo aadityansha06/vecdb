@@ -20,7 +20,10 @@ out locally, by a human, on the server itself. Read the full design here:
 - [Deployment-and-Capacity](write-up/Deployment-and-Capacity.md) — how to build and
   run it, plus real load-test numbers (verified clean up to 1000 concurrent
   connections).
-"The server's configuration supports up to 100,000 concurrent connections (file descriptor limits, accept queue depth). This has not been verified with a single-client load test, since one client machine is itself limited to roughly 28,000 simultaneous outbound connections by its local TCP port range (net.ipv4.ip_local_port_range) — testing genuine 100k concurrency would require a distributed load-generation setup across multiple client machines, a standard limitation of single-machine load testing at this scale."
+<br>
+
+>"The server's configuration supports up to 100,000 concurrent connections (file descriptor limits, accept queue depth). This has not been verified with a single-client load test, since one client machine is itself limited to roughly 28,000 simultaneous outbound connections by its local TCP port range (net.ipv4.ip_local_port_range) — testing genuine 100k concurrency would require a distributed load-generation setup across multiple client machines, a standard limitation of single-machine load testing at this scale."
+
 
 # Why this exists
 
