@@ -65,6 +65,33 @@ storage_t *storage_init(const char *table_name) {
   return storage;
 }
 
+/*
+ * On-disk record layout. Every field is written at its natural alignment so
+ * that the reader can hand out pointers into the mmap directly.
+ *
+ *   offset  0   uint64_t  id
+ *   offset  8   uint64_t  flags       (bit 0 = is_deleted)
+ *   offset 16   uint64_t  meta_len
+ *   offset 24   float     vector[dimension]
+ *   offset 24 + 4*dimension  char  metadata[meta_len]
+ *   then zero padding up to a multiple of 8
+ *
+ * The header is 24 bytes, so within a record the vector starts 8-byte aligned
+ * and meta_len is read at an 8-byte boundary. The trailing pad keeps the NEXT
+ * record aligned too: metadata is variable length, so without it a record
+ * ending on an odd byte pushes every following vector off alignment again.
+ *
+ * The previous layout put a 1-byte bool at offset 8, which left every vector
+ * at offset 9 and every meta_len at an odd address.
+ */
+#define RECORD_HEADER_BYTES (3 * sizeof(uint64_t))
+#define RECORD_ALIGN 8u
+
+static size_t record_padded_size(uint64_t dimension, uint64_t meta_len) {
+  size_t n = RECORD_HEADER_BYTES + sizeof(float) * (size_t)dimension + (size_t)meta_len;
+  return (n + (RECORD_ALIGN - 1)) & ~((size_t)RECORD_ALIGN - 1);
+}
+
 int storage_write_record(storage_t *storage, Record_t *record,
                          uint64_t dimension) {
 
@@ -76,7 +103,16 @@ int storage_write_record(storage_t *storage, Record_t *record,
   if (written != 1)
     return -1;
 
-  written = fwrite(&record->is_deleted, sizeof(bool), 1, storage->fp);
+  uint64_t flags = record->is_deleted ? 1u : 0u;
+  written = fwrite(&flags, sizeof(uint64_t), 1, storage->fp);
+  if (written != 1)
+    return -1;
+
+  uint64_t len = 0;
+  if (record->metadata != NULL) {
+    len = (uint64_t)strlen(record->metadata);
+  }
+  written = fwrite(&len, sizeof(uint64_t), 1, storage->fp);
   if (written != 1)
     return -1;
 
@@ -84,16 +120,17 @@ int storage_write_record(storage_t *storage, Record_t *record,
   if (written != dimension)
     return -1;
 
-  size_t len = 0;
-  if (record->metadata != NULL) {
-    len = strlen(record->metadata);
-  }
-  written = fwrite(&len, sizeof(size_t), 1, storage->fp);
-  if (written != 1)
-    return -1;
   if (len > 0) {
     written = fwrite(record->metadata, sizeof(char), len, storage->fp);
     if (written != len)
+      return -1;
+  }
+
+  size_t used = RECORD_HEADER_BYTES + sizeof(float) * (size_t)dimension + (size_t)len;
+  size_t pad = record_padded_size(dimension, len) - used;
+  if (pad > 0) {
+    static const uint8_t zeros[RECORD_ALIGN] = {0};
+    if (fwrite(zeros, 1, pad, storage->fp) != pad)
       return -1;
   }
 
@@ -125,20 +162,30 @@ int storage_load_record(storage_t *storage, Record_t *record,
   if (current_pos < 0 || (size_t)current_pos >= storage->file_size)
     return 0;
 
+  /* Bounds-check the whole record, not just where it starts: a file truncated
+   * mid-write leaves a header inside the mapping and a body past the end. */
+  if ((size_t)current_pos + RECORD_HEADER_BYTES > storage->file_size)
+    return 0;
+
   record->byte_offset = (uint64_t)current_pos;
   uint8_t *ptr = storage->mmap_data + current_pos;
 
   record->id = *(uint64_t *)ptr;
   ptr += sizeof(uint64_t);
 
-  record->is_deleted = *(bool *)ptr;
-  ptr += sizeof(bool);
+  uint64_t flags = *(uint64_t *)ptr;
+  record->is_deleted = (flags & 1u) != 0;
+  ptr += sizeof(uint64_t);
+
+  uint64_t len = *(uint64_t *)ptr;
+  ptr += sizeof(uint64_t);
+
+  size_t total = record_padded_size(dimension, len);
+  if ((size_t)current_pos + total > storage->file_size)
+    return 0;
 
   record->vector = (float *)ptr;
   ptr += sizeof(float) * dimension;
-
-  size_t len = *(size_t *)ptr;
-  ptr += sizeof(size_t);
 
   if (len > 0) {
     char *meta_copy = (char *)malloc(len + 1);
@@ -153,8 +200,8 @@ int storage_load_record(storage_t *storage, Record_t *record,
   }
 
   record->is_mmap = true;
-  long bytes_read = (long)(ptr - (storage->mmap_data + current_pos));
-  fseek(storage->fp, bytes_read, SEEK_CUR);
+  fseek(storage->fp, (long)current_pos + (long)record_padded_size(dimension, len),
+        SEEK_SET);
 
   return 1;
 }
@@ -218,8 +265,10 @@ int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
 }
 
 cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
-                          uint64_t dimension) {
+                          uint64_t *out_dimension) {
   char index_path[256];
+  if (out_k == NULL || out_dimension == NULL)
+    return NULL;
   snprintf(index_path, sizeof(index_path), "origin_data/%s/ivf_index.bin",
            table_name);
   FILE *fp = fopen(index_path, "rb");
@@ -232,11 +281,12 @@ cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
     return NULL;
   }
 
-  read = fread(&dimension, sizeof(uint64_t), 1, fp);
+  read = fread(out_dimension, sizeof(uint64_t), 1, fp);
   if (read != 1) {
     fclose(fp);
     return NULL;
   }
+  uint64_t dimension = *out_dimension;
 
   cluster_t *cluster = (cluster_t *)calloc(*out_k, sizeof(cluster_t));
   if (cluster == NULL) {
@@ -310,18 +360,26 @@ int storage_fetch_by_offset(storage_t *storage, uint64_t byte_offset,
   if (!storage || !storage->mmap_data || byte_offset >= storage->file_size)
     return -1;
 
+  if ((size_t)byte_offset + RECORD_HEADER_BYTES > storage->file_size)
+    return -1;
+
   uint8_t *ptr = storage->mmap_data + byte_offset;
 
   record->id = *(uint64_t *)ptr;
   ptr += sizeof(uint64_t);
 
-  record->is_deleted = *(bool *)ptr;
-  ptr += sizeof(bool);
+  uint64_t flags = *(uint64_t *)ptr;
+  record->is_deleted = (flags & 1u) != 0;
+  ptr += sizeof(uint64_t);
+
+  uint64_t len = *(uint64_t *)ptr;
+  ptr += sizeof(uint64_t);
+
+  if ((size_t)byte_offset + record_padded_size(dimension, len) > storage->file_size)
+    return -1;
 
   record->vector = (float *)ptr;
   ptr += sizeof(float) * dimension;
-  size_t len = *(size_t *)ptr;
-  ptr += sizeof(size_t);
 
   if (len > 0) {
     char *meta_copy = (char *)malloc(len + 1);
@@ -417,13 +475,21 @@ int storage_compact(storage_t *storage, Record_t **records_ptr,
     }
 
     uint64_t new_offset = (uint64_t)ftell(out);
+    uint64_t flags = records[i].is_deleted ? 1u : 0u;
+    uint64_t len = records[i].metadata ? (uint64_t)strlen(records[i].metadata) : 0;
+
     if (fwrite(&records[i].id, sizeof(uint64_t), 1, out) != 1) { failed = 1; break; }
-    if (fwrite(&records[i].is_deleted, sizeof(bool), 1, out) != 1) { failed = 1; break; }
+    if (fwrite(&flags, sizeof(uint64_t), 1, out) != 1) { failed = 1; break; }
+    if (fwrite(&len, sizeof(uint64_t), 1, out) != 1) { failed = 1; break; }
     if (fwrite(records[i].vector, sizeof(float), dimension, out) != dimension) { failed = 1; break; }
-    
-    size_t len = records[i].metadata ? strlen(records[i].metadata) : 0;
-    if (fwrite(&len, sizeof(size_t), 1, out) != 1) { failed = 1; break; }
     if (len > 0 && fwrite(records[i].metadata, sizeof(char), len, out) != len) { failed = 1; break; }
+
+    size_t used = RECORD_HEADER_BYTES + sizeof(float) * (size_t)dimension + (size_t)len;
+    size_t pad = record_padded_size(dimension, len) - used;
+    if (pad > 0) {
+      static const uint8_t zeros[RECORD_ALIGN] = {0};
+      if (fwrite(zeros, 1, pad, out) != pad) { failed = 1; break; }
+    }
     
     new_records[new_count] = records[i];
     new_offsets[new_count] = new_offset;
@@ -486,10 +552,13 @@ int storage_compact(storage_t *storage, Record_t **records_ptr,
     new_records[i].byte_offset = new_offsets[i];
     if (was_mmap[i] && storage->mmap_data != NULL) {
       uint8_t *ptr = (uint8_t *)storage->mmap_data + new_offsets[i];
-      ptr += sizeof(uint64_t) + sizeof(bool);
+      ptr += RECORD_HEADER_BYTES;
       new_records[i].vector = (float *)ptr;
       new_records[i].is_mmap = true;
     } else {
+      /* The old mapping is gone. Leaving the stale pointer here would hand a
+       * munmapped address to a later free(). */
+      new_records[i].vector = NULL;
       new_records[i].is_mmap = false;
     }
   }

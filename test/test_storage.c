@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <stdint.h>
 
 #define DIM 3
 #define TEST_TABLE "regression_storage"
@@ -205,7 +207,9 @@ TEST_CASE(test_ivf_index_roundtrip_with_empty_cluster) {
     free(clusters[1].centroid_vector);
 
     uint64_t loaded_k;
-    cluster_t *loaded = load_ivf_index(TEST_TABLE, &loaded_k, DIM);
+    uint64_t loaded_dim = 0;
+    cluster_t *loaded = load_ivf_index(TEST_TABLE, &loaded_k, &loaded_dim);
+    ASSERT_EQ_U64(loaded_dim, (uint64_t)DIM);
     ASSERT_NOT_NULL(loaded);
     ASSERT_EQ_U64(loaded_k, 2);
     ASSERT_EQ_U64(loaded[0].count, 2);
@@ -220,6 +224,75 @@ TEST_CASE(test_ivf_index_roundtrip_with_empty_cluster) {
     free(loaded);
 }
 
+/* Vectors are handed out as pointers into the mmap, so they have to sit at an
+ * address a float can legally be read from. Metadata is variable length, so
+ * the check has to survive a record whose metadata makes it end on an odd
+ * byte: without the trailing pad the FIRST record is aligned and every one
+ * after it is not. */
+TEST_CASE(test_vectors_are_aligned_in_the_mapping) {
+    cleanup_table();
+    storage_t *s = storage_init(TEST_TABLE);
+    ASSERT_NOT_NULL(s);
+
+    const char *metas[4] = {"a", "abcde", NULL, "abcdefghij"};
+    for (int i = 0; i < 4; i++) {
+        Record_t r = make_record((uint64_t)(700 + i), 1.0f * i, 2.0f * i, 3.0f * i, metas[i]);
+        ASSERT_TRUE(storage_write_record(s, &r, DIM) == 0);
+        free_record(&r);
+    }
+    ASSERT_TRUE(storage_remap(s) == 0);
+    fseek(s->fp, 0, SEEK_SET);
+
+    Record_t out;
+    int n = 0;
+    while (storage_load_record(s, &out, DIM) == 1) {
+        ASSERT_EQ_U64(out.id, (uint64_t)(700 + n));
+        ASSERT_TRUE(((uintptr_t)out.vector) % _Alignof(float) == 0);
+        ASSERT_NEAR(out.vector[1], 2.0f * n, 1e-6);
+        if (out.metadata) free(out.metadata);
+        n++;
+    }
+    ASSERT_TRUE(n == 4);
+    storage_close(s);
+    cleanup_table();
+}
+
+/* A crash midway through fwrite leaves a header inside the mapping and a body
+ * past the end of it. That has to read as EOF, not as a fault. */
+TEST_CASE(test_truncated_tail_reads_as_eof) {
+    cleanup_table();
+    storage_t *s = storage_init(TEST_TABLE);
+    ASSERT_NOT_NULL(s);
+    for (int i = 0; i < 3; i++) {
+        Record_t r = make_record((uint64_t)(800 + i), 1, 2, 3, "meta");
+        ASSERT_TRUE(storage_write_record(s, &r, DIM) == 0);
+        free_record(&r);
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "origin_data/%s/data.db", TEST_TABLE);
+    storage_close(s);
+
+    FILE *f = fopen(path, "rb");
+    ASSERT_NOT_NULL(f);
+    fseek(f, 0, SEEK_END);
+    long full = ftell(f);
+    fclose(f);
+    ASSERT_TRUE(truncate(path, full - 5) == 0);
+
+    s = storage_init(TEST_TABLE);
+    ASSERT_NOT_NULL(s);
+    fseek(s->fp, 0, SEEK_SET);
+    Record_t out;
+    int n = 0;
+    while (storage_load_record(s, &out, DIM) == 1) {
+        if (out.metadata) free(out.metadata);
+        n++;
+    }
+    ASSERT_TRUE(n == 2);
+    storage_close(s);
+    cleanup_table();
+}
+
 int main(void) {
     RUN_TEST(test_init_creates_directory);
     RUN_TEST(test_write_read_roundtrip_single_record);
@@ -228,6 +301,8 @@ int main(void) {
     RUN_TEST(test_offset_stays_correct_after_interleaved_read);
     RUN_TEST(test_fetch_by_offset_out_of_range);
     RUN_TEST(test_ivf_index_roundtrip_with_empty_cluster);
+    RUN_TEST(test_vectors_are_aligned_in_the_mapping);
+    RUN_TEST(test_truncated_tail_reads_as_eof);
     cleanup_table();
     TEST_SUMMARY();
     return g_tests_failed > 0 ? 1 : 0;
