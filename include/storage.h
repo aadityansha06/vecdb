@@ -67,11 +67,13 @@ int save_ivf_index(const char *table_name, cluster_t *clusters, uint64_t k,
  *
  * @param table_name The name of the table/folder.
  * @param out_k Pointer to store the loaded 'k' value.
- * @param dimension The vector dimensionality.
+ * @param out_dimension Pointer to store the dimensionality recorded in the
+ *        index file. The caller must use this, not its own value: if the two
+ *        disagree every centroid after the first is read from the wrong offset.
  * @return A heap-allocated array of cluster_t, or NULL on failure.
  */
 cluster_t *load_ivf_index(const char *table_name, uint64_t *out_k,
-                          uint64_t dimension);
+                          uint64_t *out_dimension);
 
 /**
  * @brief Fetches a single record from the disk using its exact byte offset.

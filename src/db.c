@@ -141,13 +141,16 @@ FlatDb_t *db_init(const char *db_name, uint64_t dimension,
   while (storage_load_record(db->storage, &temp_record, db->dimension) == 1) {
     if (db->count == db->capacity) {
 
-      uint64_t new_capacity = db->capacity * 2;
+      /* capacity can be 0 if the caller asked for it; doubling would stay 0
+       * and the append below would write past a zero-length allocation. */
+      uint64_t new_capacity = db->capacity ? db->capacity * 2 : 8;
       Record_t *resize_main_record =
           (Record_t *)realloc(db->records, sizeof(Record_t) * new_capacity);
       if (resize_main_record == NULL) {
         perror("Fatal Error: Failed to Load data due to out of memory \n");
         free(db->records);
-        free(db->storage);
+        /* storage_t owns an mmap and a FILE*; free() releases neither. */
+        storage_close(db->storage);
         free(db);
         return NULL;
 

@@ -719,8 +719,15 @@ static void handel_client(server_data_t *server, char *header_buffer,
         pthread_rwlock_wrlock(&index_lock);
 
         if (!table->index_loaded) {
+          uint64_t ivf_dimension = 0;
           table->ivf_index =
-              load_ivf_index(req->db_name, &table->ivf_k, req->dimension);
+              load_ivf_index(req->db_name, &table->ivf_k, &ivf_dimension);
+          /* An index built for a different dimension cannot be read with this
+           * one: every centroid after the first would come from the wrong
+           * offset and the search would return plausible-looking nonsense. */
+          if (table->ivf_index != NULL && ivf_dimension != db->dimension) {
+            clear_cached_index(table);
+          }
           table->index_loaded = true;
         }
 
